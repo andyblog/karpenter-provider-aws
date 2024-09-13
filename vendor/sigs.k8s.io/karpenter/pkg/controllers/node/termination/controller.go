@@ -101,13 +101,41 @@ func (c *Controller) finalize(ctx context.Context, node *corev1.Node) (reconcile
 		return reconcile.Result{}, err
 	}
 
+	log.FromContext(ctx).V(1).
+		WithValues("taint node",node.Name).
+		Info("#############debug30")
+
 	if err := c.terminator.Taint(ctx, node, v1.DisruptedNoScheduleTaint); err != nil {
 		return reconcile.Result{}, fmt.Errorf("tainting node with %s, %w", v1.DisruptedTaintKey, err)
 	}
+
+
+
+	log.FromContext(ctx).V(1).
+		WithValues("drain node",node.Name).
+		//WithValues("terminationTime",*nodeTerminationTime).
+		Info("#debug31")
 	if err := c.terminator.Drain(ctx, node, nodeTerminationTime); err != nil {
+
+
+
+
+		log.FromContext(ctx).V(1).
+			WithValues("drain node error",node.Name).
+			WithValues("error",err.Error()).
+			Info("#debug33")
+
+
 		if !terminator.IsNodeDrainError(err) {
 			return reconcile.Result{}, fmt.Errorf("draining node, %w", err)
 		}
+
+
+		log.FromContext(ctx).V(1).
+			WithValues("drain node error",node.Name).
+			WithValues("error",err.Error()).
+			Info("#debug41")
+
 		c.recorder.Publish(terminatorevents.NodeFailedToDrain(node, err))
 		// If the underlying NodeClaim no longer exists, we want to delete to avoid trying to gracefully draining
 		// on nodes that are no longer alive. We do a check on the Ready condition of the node since, even
@@ -115,6 +143,13 @@ func (c *Controller) finalize(ctx context.Context, node *corev1.Node) (reconcile
 		// if the Node Ready condition is true
 		// Similar logic to: https://github.com/kubernetes/kubernetes/blob/3a75a8c8d9e6a1ebd98d8572132e675d4980f184/staging/src/k8s.io/cloud-provider/controllers/nodelifecycle/node_lifecycle_controller.go#L144
 		if nodeutils.GetCondition(node, corev1.NodeReady).Status != corev1.ConditionTrue {
+
+
+			log.FromContext(ctx).V(1).
+				WithValues("drain node error",node.Name).
+				WithValues("error",err.Error()).
+				Info("#debug42")
+
 			if _, err := c.cloudProvider.Get(ctx, node.Spec.ProviderID); err != nil {
 				if cloudprovider.IsNodeClaimNotFoundError(err) {
 					return reconcile.Result{}, c.removeFinalizer(ctx, node)
@@ -125,6 +160,12 @@ func (c *Controller) finalize(ctx context.Context, node *corev1.Node) (reconcile
 
 		return reconcile.Result{RequeueAfter: 1 * time.Second}, nil
 	}
+
+
+	log.FromContext(ctx).V(1).
+		WithValues("drain node complate",node.Name).
+		Info("#debug32")
+
 	// In order for Pods associated with PersistentVolumes to smoothly migrate from the terminating Node, we wait
 	// for VolumeAttachments of drain-able Pods to be cleaned up before terminating Node and removing its finalizer.
 	// However, if TerminationGracePeriod is configured for Node, and we are past that period, we will skip waiting.

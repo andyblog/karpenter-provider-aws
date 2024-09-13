@@ -97,16 +97,45 @@ func (t *Terminator) Drain(ctx context.Context, node *corev1.Node, nodeGracePeri
 		return fmt.Errorf("listing pods on node, %w", err)
 	}
 
+	// 遍历pod，找出为deployment，并且副本为1 的pod，
+
+
+
+
+
+
 	podsToDelete := lo.Filter(pods, func(p *corev1.Pod, _ int) bool {
 		return podutil.IsWaitingEviction(p, t.clock) && !podutil.IsTerminating(p)
 	})
+
+	for _,v := range podsToDelete {
+		log.FromContext(ctx).V(1).
+			WithValues("podsToDelete",v.Name).
+			Info("#debug34")
+	}
+
+
+
+
+
 	if err := t.DeleteExpiringPods(ctx, podsToDelete, nodeGracePeriodExpirationTime); err != nil {
 		return fmt.Errorf("deleting expiring pods, %w", err)
 	}
 
 	// evictablePods are pods that aren't yet terminating are eligible to have the eviction API called against them
 	evictablePods := lo.Filter(pods, func(p *corev1.Pod, _ int) bool { return podutil.IsEvictable(p) })
+
+	for _,v := range evictablePods {
+		log.FromContext(ctx).V(1).
+			WithValues("evictablePods",v.Name).
+			Info("#debug35")
+	}
+
+
 	t.Evict(evictablePods)
+
+	log.FromContext(ctx).V(1).
+		Info("#debug36")
 
 	// podsWaitingEvictionCount is the number of pods that either haven't had eviction called against them yet
 	// or are still actively terminating and haven't exceeded their termination grace period yet
@@ -158,9 +187,19 @@ func (t *Terminator) EvictInOrder(pods ...[]*corev1.Pod) {
 
 func (t *Terminator) DeleteExpiringPods(ctx context.Context, pods []*corev1.Pod, nodeGracePeriodTerminationTime *time.Time) error {
 	for _, pod := range pods {
+
+
+		log.FromContext(ctx).V(1).
+			WithValues("pod name", pod.Name).
+			Info("#debug38")
+
 		// check if the node has an expiration time and the pod needs to be deleted
 		deleteTime := t.podDeleteTimeWithGracePeriod(nodeGracePeriodTerminationTime, pod)
 		if deleteTime != nil && time.Now().After(*deleteTime) {
+
+			log.FromContext(ctx).V(1).
+				WithValues("pod name", pod.Name).
+				Info("#debug39")
 			// delete pod proactively to give as much of its terminationGracePeriodSeconds as possible for deletion
 			// ensure that we clamp the maximum pod terminationGracePeriodSeconds to the node's remaining expiration time in the delete command
 			gracePeriodSeconds := lo.ToPtr(int64(time.Until(*nodeGracePeriodTerminationTime).Seconds()))
@@ -171,6 +210,11 @@ func (t *Terminator) DeleteExpiringPods(ctx context.Context, pods []*corev1.Pod,
 			if err := t.kubeClient.Delete(ctx, pod, opts); err != nil && !apierrors.IsNotFound(err) { // ignore 404, not a problem
 				return fmt.Errorf("deleting pod, %w", err) // otherwise, bubble up the error
 			}
+
+			log.FromContext(ctx).V(1).
+				WithValues("pod name", pod.Name).
+				Info("#debug40")
+
 			log.FromContext(ctx).WithValues(
 				"namespace", pod.Namespace,
 				"name", pod.Name,

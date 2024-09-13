@@ -66,7 +66,8 @@ type Controller struct {
 }
 
 // pollingPeriod that we inspect cluster to look for opportunities to disrupt
-const pollingPeriod = 2 * time.Minute
+const pollingPeriod = 200 * time.Minute
+//const pollingPeriod = 10 * time.Second
 
 func NewController(clk clock.Clock, kubeClient client.Client, provisioner *provisioning.Provisioner,
 	cp cloudprovider.CloudProvider, recorder events.Recorder, cluster *state.Cluster, queue *orchestration.Queue,
