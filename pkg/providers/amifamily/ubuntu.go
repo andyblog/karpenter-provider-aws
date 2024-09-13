@@ -1,0 +1,81 @@
+/*
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package amifamily
+
+import (
+	"fmt"
+
+	"github.com/aws/aws-sdk-go/aws"
+	corev1 "k8s.io/api/core/v1"
+
+	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
+
+	v1 "github.com/aws/karpenter-provider-aws/pkg/apis/v1"
+	"github.com/aws/karpenter-provider-aws/pkg/providers/amifamily/bootstrap"
+
+	"sigs.k8s.io/karpenter/pkg/cloudprovider"
+	"sigs.k8s.io/karpenter/pkg/scheduling"
+)
+
+type Ubuntu struct {
+	DefaultFamily
+	*Options
+}
+
+// DefaultAMIs returns the AMI name, and Requirements, with an SSM query
+// TODO: This should be removed at v1.1.0
+func (u Ubuntu) DefaultAMIs(version string) []DefaultAMIOutput {
+	return []DefaultAMIOutput{
+		{
+			Query: fmt.Sprintf("/aws/service/canonical/ubuntu/eks/20.04/%s/stable/current/%s/hvm/ebs-gp2/ami-id", version, karpv1.ArchitectureAmd64),
+			Requirements: scheduling.NewRequirements(
+				scheduling.NewRequirement(corev1.LabelArchStable, corev1.NodeSelectorOpIn, karpv1.ArchitectureAmd64),
+			),
+		},
+		{
+			Query: fmt.Sprintf("/aws/service/canonical/ubuntu/eks/20.04/%s/stable/current/%s/hvm/ebs-gp2/ami-id", version, karpv1.ArchitectureArm64),
+			Requirements: scheduling.NewRequirements(
+				scheduling.NewRequirement(corev1.LabelArchStable, corev1.NodeSelectorOpIn, karpv1.ArchitectureArm64),
+			),
+		},
+	}
+}
+
+// UserData returns the default userdata script for the AMI Family
+func (u Ubuntu) UserData(kubeletConfig *v1.KubeletConfiguration, taints []corev1.Taint, labels map[string]string, caBundle *string, _ []*cloudprovider.InstanceType, customUserData *string, _ *v1.InstanceStorePolicy) bootstrap.Bootstrapper {
+	return bootstrap.EKS{
+		Options: bootstrap.Options{
+			ClusterName:     u.Options.ClusterName,
+			ClusterEndpoint: u.Options.ClusterEndpoint,
+			KubeletConfig:   kubeletConfig,
+			Taints:          taints,
+			Labels:          labels,
+			CABundle:        caBundle,
+			CustomUserData:  customUserData,
+		},
+	}
+}
+
+// DefaultBlockDeviceMappings returns the default block device mappings for the AMI Family
+func (u Ubuntu) DefaultBlockDeviceMappings() []*v1.BlockDeviceMapping {
+	return []*v1.BlockDeviceMapping{{
+		DeviceName: u.EphemeralBlockDevice(),
+		EBS:        &DefaultEBS,
+	}}
+}
+
+func (u Ubuntu) EphemeralBlockDevice() *string {
+	return aws.String("/dev/sda1")
+}
