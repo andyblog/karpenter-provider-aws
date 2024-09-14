@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"time"
+	"encoding/json"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/samber/lo"
@@ -171,6 +172,12 @@ func (c *Controller) finalize(ctx context.Context, node *corev1.Node) (reconcile
 	// However, if TerminationGracePeriod is configured for Node, and we are past that period, we will skip waiting.
 	if nodeTerminationTime == nil || c.clock.Now().Before(*nodeTerminationTime) {
 		areVolumesDetached, err := c.ensureVolumesDetached(ctx, node)
+
+		data, _ := json.Marshal(&areVolumesDetached)
+		log.FromContext(ctx).V(1).
+			WithValues("areVolumesDetached",string(data)).
+			WithValues("error", err).
+			Info("#debug44")
 		if err != nil {
 			return reconcile.Result{}, fmt.Errorf("ensuring no volume attachments, %w", err)
 		}
@@ -182,8 +189,18 @@ func (c *Controller) finalize(ctx context.Context, node *corev1.Node) (reconcile
 	if err != nil {
 		return reconcile.Result{}, fmt.Errorf("deleting nodeclaims, %w", err)
 	}
+
+	log.FromContext(ctx).V(1).
+		Info("#debug45")
+
+
 	for _, nodeClaim := range nodeClaims {
 		isInstanceTerminated, err := termination.EnsureTerminated(ctx, c.kubeClient, nodeClaim, c.cloudProvider)
+
+		log.FromContext(ctx).V(1).
+			WithValues("isInstanceTerminated", isInstanceTerminated).
+			WithValues("error", err).
+			Info("#debug46")
 		if err != nil {
 			// 404 = the nodeClaim no longer exists
 			if errors.IsNotFound(err) {
@@ -199,9 +216,13 @@ func (c *Controller) finalize(ctx context.Context, node *corev1.Node) (reconcile
 			return reconcile.Result{RequeueAfter: 5 * time.Second}, nil
 		}
 	}
+
+
+
 	if err := c.removeFinalizer(ctx, node); err != nil {
 		return reconcile.Result{}, err
 	}
+
 	return reconcile.Result{}, nil
 }
 

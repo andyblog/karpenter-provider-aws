@@ -19,6 +19,7 @@ package terminator
 import (
 	"context"
 	"fmt"
+	//"encoding/json"
 	"time"
 
 	"github.com/samber/lo"
@@ -31,6 +32,7 @@ import (
 
 	"sigs.k8s.io/karpenter/pkg/events"
 	nodeutil "sigs.k8s.io/karpenter/pkg/utils/node"
+	appsv1 "k8s.io/api/apps/v1"
 
 	terminatorevents "sigs.k8s.io/karpenter/pkg/controllers/node/termination/terminator/events"
 	podutil "sigs.k8s.io/karpenter/pkg/utils/pod"
@@ -89,25 +91,119 @@ func (t *Terminator) Taint(ctx context.Context, node *corev1.Node, taint corev1.
 	return nil
 }
 
+
+
+func (t *Terminator) GetDeploymentFromPod(ctx context.Context, pod *corev1.Pod) (*appsv1.Deployment,error) {
+	var rsName string
+	for _, ownerRef := range pod.GetOwnerReferences() {
+		if *ownerRef.Controller && ownerRef.Kind == "ReplicaSet" {
+			rsName = ownerRef.Name
+			break
+		}
+	}
+	if rsName == "" {
+		return  nil, nil
+	}
+
+	replicaSet := &appsv1.ReplicaSet{}
+	if err := t.kubeClient.Get(ctx,  client.ObjectKey{Name: rsName, Namespace: pod.Namespace},replicaSet); err != nil {
+		return nil, fmt.Errorf("get rs, %w", err)
+	}
+
+	var dpName string
+	for _, ownerRef := range replicaSet.GetOwnerReferences() {
+		if *ownerRef.Controller && ownerRef.Kind == "Deployment" {
+			dpName = ownerRef.Name
+			break
+		}
+	}
+	if dpName == "" {
+		return  nil, nil
+	}
+	deployment := &appsv1.Deployment{}
+	if err := t.kubeClient.Get(ctx,  client.ObjectKey{Name: dpName, Namespace: pod.Namespace},deployment); err != nil {
+		return nil, fmt.Errorf("get deploy, %w", err)
+	}
+
+
+	return deployment, nil
+}
+
+func (t *Terminator) RestartDeployment(ctx context.Context, dps []*appsv1.Deployment, nodeName string ) error {
+	for _, dp := range dps {
+		if dp.Spec.Template.Annotations == nil {
+			dp.Spec.Template.Annotations = make(map[string]string)
+		}
+		restartedAt, exists := dp.Spec.Template.Annotations["kubectl.kubernetes.io/restartedAt"]
+		if exists && restartedAt == nodeName {
+			continue
+		}
+
+		log.FromContext(ctx).V(1).
+			WithValues("restart dp",dp.Namespace).
+			WithValues("name",dp.Name).
+			Info("#debug43")
+
+		dp.Spec.Template.Annotations["kubectl.kubernetes.io/restartedAt"] = nodeName
+		if err := t.kubeClient.Update(ctx, dp); err != nil {
+			return err
+		}
+
+	}
+	return nil
+}
+
+
+
+
 // Drain evicts pods from the node and returns true when all pods are evicted
 // https://kubernetes.io/docs/concepts/architecture/nodes/#graceful-node-shutdown
 func (t *Terminator) Drain(ctx context.Context, node *corev1.Node, nodeGracePeriodExpirationTime *time.Time) error {
-	pods, err := nodeutil.GetPods(ctx, t.kubeClient, node)
+	allPod, err := nodeutil.GetPods(ctx, t.kubeClient, node)
 	if err != nil {
 		return fmt.Errorf("listing pods on node, %w", err)
 	}
 
-	// 遍历pod，找出为deployment，并且副本为1 的pod，
+	var pods []*corev1.Pod
+	var dps []*appsv1.Deployment
+	for _, pod := range  allPod {
+		dp, err := t.GetDeploymentFromPod(ctx, pod)
+		if err != nil {
+			return err
+		}
 
+		if dp != nil && *dp.Spec.Replicas == 1 {
+			dps = append(dps, dp)
 
+		}else {
+			pods = append(pods, pod)
 
+		}
+	}
 
+	if err = t.RestartDeployment(ctx, dps, node.Name); err != nil {
+		return fmt.Errorf("restart dp , %w", err)
+	}
+
+	//data, _ := json.Marshal(&pods)
+	log.FromContext(ctx).V(1).
+		WithValues("pods",len(pods)).
+		//WithValues("pods",string(data)).
+		Info("#debug45")
 
 
 	podsToDelete := lo.Filter(pods, func(p *corev1.Pod, _ int) bool {
+		log.FromContext(ctx).V(1).
+			WithValues("pod",p.Name).
+			WithValues("IsWaitingEviction",podutil.IsWaitingEviction(p, t.clock)).
+			WithValues("!IsTerminating",!podutil.IsTerminating(p)).
+			Info("#debug48")
 		return podutil.IsWaitingEviction(p, t.clock) && !podutil.IsTerminating(p)
 	})
 
+	log.FromContext(ctx).V(1).
+		WithValues("podsToDelete",len(podsToDelete)).
+		Info("#debug46")
 	for _,v := range podsToDelete {
 		log.FromContext(ctx).V(1).
 			WithValues("podsToDelete",v.Name).
@@ -115,10 +211,7 @@ func (t *Terminator) Drain(ctx context.Context, node *corev1.Node, nodeGracePeri
 	}
 
 
-
-
-
-	if err := t.DeleteExpiringPods(ctx, podsToDelete, nodeGracePeriodExpirationTime); err != nil {
+	if err = t.DeleteExpiringPods(ctx, podsToDelete, nodeGracePeriodExpirationTime); err != nil {
 		return fmt.Errorf("deleting expiring pods, %w", err)
 	}
 
@@ -135,13 +228,24 @@ func (t *Terminator) Drain(ctx context.Context, node *corev1.Node, nodeGracePeri
 	t.Evict(evictablePods)
 
 	log.FromContext(ctx).V(1).
+		WithValues("evictablePods",len(evictablePods)).
 		Info("#debug36")
 
 	// podsWaitingEvictionCount is the number of pods that either haven't had eviction called against them yet
 	// or are still actively terminating and haven't exceeded their termination grace period yet
-	podsWaitingEvictionCount := lo.CountBy(pods, func(p *corev1.Pod) bool { return podutil.IsWaitingEviction(p, t.clock) })
+	podsWaitingEvictionCount := lo.CountBy(allPod, func(p *corev1.Pod) bool {
+		log.FromContext(ctx).V(1).
+			WithValues("pod",p.Name).
+			WithValues("IsWaitingEviction",podutil.IsWaitingEviction(p, t.clock)).
+			WithValues("!IsTerminating",!podutil.IsTerminal(p)).
+			WithValues("IsDrainable",podutil.IsDrainable(p, t.clock)).
+			Info("#debug49")
+
+
+		return podutil.IsWaitingEviction(p, t.clock)
+	})
 	if podsWaitingEvictionCount > 0 {
-		return NewNodeDrainError(fmt.Errorf("%d pods are waiting to be evicted", len(pods)))
+		return NewNodeDrainError(fmt.Errorf("%d pods are waiting to be evicted", podsWaitingEvictionCount))
 	}
 	return nil
 }
