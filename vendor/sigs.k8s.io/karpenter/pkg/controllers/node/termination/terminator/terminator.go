@@ -222,7 +222,6 @@ func (t *Terminator) Drain(ctx context.Context, node *corev1.Node, drainPods []*
 			Info("#debug34")
 	}
 
-
 	if err = t.DeleteExpiringPods(ctx, podsToDelete, nodeGracePeriodExpirationTime); err != nil {
 		return fmt.Errorf("deleting expiring pods, %w", err)
 	}

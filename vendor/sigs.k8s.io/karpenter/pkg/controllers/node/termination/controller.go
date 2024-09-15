@@ -126,7 +126,6 @@ func (c *Controller) finalize(ctx context.Context, node *corev1.Node) (reconcile
 		//WithValues("terminationTime",*nodeTerminationTime).
 		Info("#debug31")
 	if err := c.terminator.Drain(ctx, node, drainPods, nodeTerminationTime); err != nil {
-
 		log.FromContext(ctx).V(1).
 			WithValues("drain node error",node.Name).
 			WithValues("error",err.Error()).
