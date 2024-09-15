@@ -19,7 +19,7 @@ package terminator
 import (
 	"context"
 	"fmt"
-	//"encoding/json"
+	"encoding/json"
 	"time"
 
 	"github.com/samber/lo"
@@ -166,29 +166,41 @@ func (t *Terminator) Drain(ctx context.Context, node *corev1.Node, nodeGracePeri
 
 	var pods []*corev1.Pod
 	var dps []*appsv1.Deployment
+	dpmap := make(map[string]int32)
+
 	for _, pod := range  allPod {
 		dp, err := t.GetDeploymentFromPod(ctx, pod)
 		if err != nil {
 			return err
 		}
 
-		if dp != nil && *dp.Spec.Replicas == 1 {
-			dps = append(dps, dp)
-
-		}else {
-			pods = append(pods, pod)
-
+		if dp != nil {
+			dpmap[dp.Namespace+":"+dp.Name] += 1
 		}
 	}
+
+	for _, pod := range  allPod {
+		dp, err := t.GetDeploymentFromPod(ctx, pod)
+		if err != nil {
+			return err
+		}
+
+		if dp != nil && dpmap[dp.Namespace+":"+dp.Name] == *dp.Spec.Replicas{
+			dps = append(dps, dp)
+		} else {
+			pods = append(pods, pod)
+		}
+	}
+
 
 	if err = t.RestartDeployment(ctx, dps, node.Name); err != nil {
 		return fmt.Errorf("restart dp , %w", err)
 	}
 
-	//data, _ := json.Marshal(&pods)
+	data, _ := json.Marshal(&dpmap)
 	log.FromContext(ctx).V(1).
 		WithValues("pods",len(pods)).
-		//WithValues("pods",string(data)).
+		WithValues("dpmap",string(data)).
 		Info("#debug45")
 
 
