@@ -256,7 +256,7 @@ func (t *Terminator) Drain(ctx context.Context, node *corev1.Node, drainPods []*
 		return podutil.IsWaitingEviction(p, t.clock)
 	})
 	if podsWaitingEvictionCount > 0 {
-		return NewNodeDrainError(fmt.Errorf("%d pods are waiting to be evicted", pods))
+		return NewNodeDrainError(fmt.Errorf("%d pods are waiting to be evicted", len(pods)))
 	}
 	return nil
 }
