@@ -122,30 +122,29 @@ func (t *Terminator) GetDeploymentFromPod(ctx context.Context, pod *corev1.Pod) 
 	}
 	deployment := &appsv1.Deployment{}
 	if err := t.kubeClient.Get(ctx,  client.ObjectKey{Name: dpName, Namespace: pod.Namespace},deployment); err != nil {
-		return nil, fmt.Errorf("get deploy, %w", err)
+		return nil, fmt.Errorf("get deployment, %w", err)
 	}
-
 
 	return deployment, nil
 }
 
-func (t *Terminator) RestartDeployment(ctx context.Context, dps []*appsv1.Deployment, nodeName string ) error {
-	for _, dp := range dps {
-		if dp.Spec.Template.Annotations == nil {
-			dp.Spec.Template.Annotations = make(map[string]string)
+func (t *Terminator) RestartDeployments(ctx context.Context, deployments []*appsv1.Deployment, nodeName string ) error {
+	for _, deployment := range deployments {
+		if deployment.Spec.Template.Annotations == nil {
+			deployment.Spec.Template.Annotations = make(map[string]string)
 		}
-		restartedAt, exists := dp.Spec.Template.Annotations["kubectl.kubernetes.io/restartedAt"]
+		restartedAt, exists := deployment.Spec.Template.Annotations["kubectl.kubernetes.io/restartedNode"]
 		if exists && restartedAt == nodeName {
 			continue
 		}
 
 		log.FromContext(ctx).V(1).
-			WithValues("restart dp",dp.Namespace).
-			WithValues("name",dp.Name).
+			WithValues("restart dp",deployment.Namespace).
+			WithValues("name",deployment.Name).
 			Info("#debug43")
 
-		dp.Spec.Template.Annotations["kubectl.kubernetes.io/restartedAt"] = nodeName
-		if err := t.kubeClient.Update(ctx, dp); err != nil {
+		deployment.Spec.Template.Annotations["kubectl.kubernetes.io/restartedAt"] = nodeName
+		if err := t.kubeClient.Update(ctx, deployment); err != nil {
 			return err
 		}
 
@@ -153,58 +152,59 @@ func (t *Terminator) RestartDeployment(ctx context.Context, dps []*appsv1.Deploy
 	return nil
 }
 
+func (t *Terminator) GetdeploymentsAndDrainPodsFromNode(ctx context.Context, node *corev1.Node) ([]*appsv1.Deployment, []*corev1.Pod,error){
+	nodePods, err := nodeutil.GetPods(ctx, t.kubeClient, node)
+	if err != nil {
+		return nil,nil,fmt.Errorf("listing pods on node, %w", err)
+	}
+
+	var drainPods []*corev1.Pod
+	var restartDeployments []*appsv1.Deployment
+	nodeDeploymentReplicas := make(map[string]int32)
+
+	for _, pod := range nodePods {
+		deployment, err := t.GetDeploymentFromPod(ctx, pod)
+		if err != nil {
+			return nil,nil,err
+		}
+
+		if deployment != nil {
+			nodeDeploymentReplicas[deployment.Namespace+":"+deployment.Name] += 1
+		}
+	}
+
+	data, _ := json.Marshal(&nodeDeploymentReplicas)
+	log.FromContext(ctx).V(1).
+		WithValues("nodeDeploymentReplicas",string(data)).
+		WithValues("node",node.Name).
+		Info("#debug51")
 
 
+	for _, pod := range nodePods {
+		deployment, err := t.GetDeploymentFromPod(ctx, pod)
+		if err != nil {
+			return nil,nil,err
+		}
+
+		if deployment != nil && nodeDeploymentReplicas[deployment.Namespace+":"+deployment.Name] == *deployment.Spec.Replicas{
+			restartDeployments = append(restartDeployments, deployment)
+		} else {
+			drainPods = append(drainPods, pod)
+		}
+	}
+
+	return restartDeployments, drainPods, nil
+}
 
 // Drain evicts pods from the node and returns true when all pods are evicted
 // https://kubernetes.io/docs/concepts/architecture/nodes/#graceful-node-shutdown
-func (t *Terminator) Drain(ctx context.Context, node *corev1.Node, nodeGracePeriodExpirationTime *time.Time) error {
-	allPod, err := nodeutil.GetPods(ctx, t.kubeClient, node)
+func (t *Terminator) Drain(ctx context.Context, node *corev1.Node, drainPods []*corev1.Pod, nodeGracePeriodExpirationTime *time.Time) error {
+	pods, err := nodeutil.GetPods(ctx, t.kubeClient, node)
 	if err != nil {
 		return fmt.Errorf("listing pods on node, %w", err)
 	}
 
-	var pods []*corev1.Pod
-	var dps []*appsv1.Deployment
-	dpmap := make(map[string]int32)
-
-	for _, pod := range  allPod {
-		dp, err := t.GetDeploymentFromPod(ctx, pod)
-		if err != nil {
-			return err
-		}
-
-		if dp != nil {
-			dpmap[dp.Namespace+":"+dp.Name] += 1
-		}
-	}
-
-	for _, pod := range  allPod {
-		dp, err := t.GetDeploymentFromPod(ctx, pod)
-		if err != nil {
-			return err
-		}
-
-		if dp != nil && dpmap[dp.Namespace+":"+dp.Name] == *dp.Spec.Replicas{
-			dps = append(dps, dp)
-		} else {
-			pods = append(pods, pod)
-		}
-	}
-
-
-	if err = t.RestartDeployment(ctx, dps, node.Name); err != nil {
-		return fmt.Errorf("restart dp , %w", err)
-	}
-
-	data, _ := json.Marshal(&dpmap)
-	log.FromContext(ctx).V(1).
-		WithValues("pods",len(pods)).
-		WithValues("dpmap",string(data)).
-		Info("#debug45")
-
-
-	podsToDelete := lo.Filter(pods, func(p *corev1.Pod, _ int) bool {
+	podsToDelete := lo.Filter(drainPods, func(p *corev1.Pod, _ int) bool {
 		log.FromContext(ctx).V(1).
 			WithValues("pod",p.Name).
 			WithValues("IsWaitingEviction",podutil.IsWaitingEviction(p, t.clock)).
@@ -228,7 +228,7 @@ func (t *Terminator) Drain(ctx context.Context, node *corev1.Node, nodeGracePeri
 	}
 
 	// evictablePods are pods that aren't yet terminating are eligible to have the eviction API called against them
-	evictablePods := lo.Filter(pods, func(p *corev1.Pod, _ int) bool { return podutil.IsEvictable(p) })
+	evictablePods := lo.Filter(drainPods, func(p *corev1.Pod, _ int) bool { return podutil.IsEvictable(p) })
 
 	for _,v := range evictablePods {
 		log.FromContext(ctx).V(1).
@@ -245,7 +245,7 @@ func (t *Terminator) Drain(ctx context.Context, node *corev1.Node, nodeGracePeri
 
 	// podsWaitingEvictionCount is the number of pods that either haven't had eviction called against them yet
 	// or are still actively terminating and haven't exceeded their termination grace period yet
-	podsWaitingEvictionCount := lo.CountBy(allPod, func(p *corev1.Pod) bool {
+	podsWaitingEvictionCount := lo.CountBy(pods, func(p *corev1.Pod) bool {
 		log.FromContext(ctx).V(1).
 			WithValues("pod",p.Name).
 			WithValues("IsWaitingEviction",podutil.IsWaitingEviction(p, t.clock)).
@@ -257,7 +257,7 @@ func (t *Terminator) Drain(ctx context.Context, node *corev1.Node, nodeGracePeri
 		return podutil.IsWaitingEviction(p, t.clock)
 	})
 	if podsWaitingEvictionCount > 0 {
-		return NewNodeDrainError(fmt.Errorf("%d pods are waiting to be evicted", podsWaitingEvictionCount))
+		return NewNodeDrainError(fmt.Errorf("%d pods are waiting to be evicted", pods))
 	}
 	return nil
 }

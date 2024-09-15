@@ -111,15 +111,21 @@ func (c *Controller) finalize(ctx context.Context, node *corev1.Node) (reconcile
 	}
 
 
+	restartDeployments, drainPods, err := c.terminator.GetdeploymentsAndDrainPodsFromNode(ctx, node)
+	if err != nil {
+		return reconcile.Result{}, fmt.Errorf("get deployment and drain pod from node %w", err)
+	}
+
+	if err = c.terminator.RestartDeployments(ctx, restartDeployments, node.Name); err != nil {
+		return reconcile.Result{}, fmt.Errorf("restart deployments from node %s, %w", node.Name, err)
+	}
+
 
 	log.FromContext(ctx).V(1).
 		WithValues("drain node",node.Name).
 		//WithValues("terminationTime",*nodeTerminationTime).
 		Info("#debug31")
-	if err := c.terminator.Drain(ctx, node, nodeTerminationTime); err != nil {
-
-
-
+	if err := c.terminator.Drain(ctx, node, drainPods, nodeTerminationTime); err != nil {
 
 		log.FromContext(ctx).V(1).
 			WithValues("drain node error",node.Name).
