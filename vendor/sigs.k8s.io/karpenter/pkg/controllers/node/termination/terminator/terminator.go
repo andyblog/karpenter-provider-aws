@@ -133,8 +133,8 @@ func (t *Terminator) RestartDeployments(ctx context.Context, deployments []*apps
 		if deployment.Spec.Template.Annotations == nil {
 			deployment.Spec.Template.Annotations = make(map[string]string)
 		}
-		restartedAt, exists := deployment.Spec.Template.Annotations["kubectl.kubernetes.io/restartedNode"]
-		if exists && restartedAt == nodeName {
+		restartedNode, exists := deployment.Spec.Template.Annotations["kubectl.kubernetes.io/restartedNode"]
+		if exists && restartedNode == nodeName {
 			continue
 		}
 
@@ -143,7 +143,7 @@ func (t *Terminator) RestartDeployments(ctx context.Context, deployments []*apps
 			WithValues("name",deployment.Name).
 			Info("#debug43")
 
-		deployment.Spec.Template.Annotations["kubectl.kubernetes.io/restartedAt"] = nodeName
+		deployment.Spec.Template.Annotations["kubectl.kubernetes.io/restartedNode"] = nodeName
 		if err := t.kubeClient.Update(ctx, deployment); err != nil {
 			return err
 		}
@@ -169,7 +169,7 @@ func (t *Terminator) GetdeploymentsAndDrainPodsFromNode(ctx context.Context, nod
 		}
 
 		if deployment != nil {
-			nodeDeploymentReplicas[deployment.Namespace+":"+deployment.Name] += 1
+			nodeDeploymentReplicas[deployment.Namespace+"/"+deployment.Name] += 1
 		}
 	}
 
@@ -186,7 +186,7 @@ func (t *Terminator) GetdeploymentsAndDrainPodsFromNode(ctx context.Context, nod
 			return nil,nil,err
 		}
 
-		if deployment != nil && nodeDeploymentReplicas[deployment.Namespace+":"+deployment.Name] == *deployment.Spec.Replicas{
+		if deployment != nil && nodeDeploymentReplicas[deployment.Namespace+"/"+deployment.Name] == *deployment.Spec.Replicas{
 			restartDeployments = append(restartDeployments, deployment)
 		} else {
 			drainPods = append(drainPods, pod)
