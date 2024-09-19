@@ -22,6 +22,7 @@ import (
 
 	"github.com/samber/lo"
 	v1 "k8s.io/api/core/v1"
+	appsv1 "k8s.io/api/apps/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/utils/clock"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -84,8 +85,20 @@ func (t *Terminator) Drain(ctx context.Context, node *v1.Node) error {
 	if err != nil {
 		return fmt.Errorf("listing pods on node, %w", err)
 	}
+
+	// If the deployment corresponding to the pod has only one pod,
+	// or all the pods of the deployment are on this node,
+	// restarting the deployment can reduce the service interruption time.
+	restartDeployments, drainPods, err := t.GetRestartdeploymentsAndDrainPods(ctx, pods)
+	if err != nil {
+		return fmt.Errorf("get deployment and drain pod from node %w", err)
+	}
+	if err = t.RestartDeployments(ctx, restartDeployments, node.Name); err != nil {
+		return fmt.Errorf("restart deployments from node %s, %w", node.Name, err)
+	}
+
 	// evictablePods are pods that aren't yet terminating are eligible to have the eviction API called against them
-	evictablePods := lo.Filter(pods, func(p *v1.Pod, _ int) bool { return podutil.IsEvictable(p) })
+	evictablePods := lo.Filter(drainPods, func(p *v1.Pod, _ int) bool { return podutil.IsEvictable(p) })
 	t.Evict(evictablePods)
 
 	// podsWaitingEvictionCount are  the number of pods that either haven't had eviction called against them yet
@@ -129,4 +142,92 @@ func (t *Terminator) Evict(pods []*v1.Pod) {
 	} else if len(criticalDaemon) != 0 {
 		t.evictionQueue.Add(criticalDaemon...)
 	}
+}
+
+
+func (t *Terminator) GetDeploymentFromPod(ctx context.Context, pod *v1.Pod) (*appsv1.Deployment, error) {
+	var rsName string
+	for _, ownerRef := range pod.GetOwnerReferences() {
+		if ownerRef.Controller != nil && ownerRef.Kind == "ReplicaSet" {
+			rsName = ownerRef.Name
+			break
+		}
+	}
+	if rsName == "" {
+		return nil, nil
+	}
+
+	replicaSet := &appsv1.ReplicaSet{}
+	if err := t.kubeClient.Get(ctx, client.ObjectKey{Name: rsName, Namespace: pod.Namespace}, replicaSet); err != nil {
+		return nil, fmt.Errorf("get rs, %w", err)
+	}
+
+	var dpName string
+	for _, ownerRef := range replicaSet.GetOwnerReferences() {
+		if ownerRef.Controller != nil && ownerRef.Kind == "Deployment" {
+			dpName = ownerRef.Name
+			break
+		}
+	}
+	if dpName == "" {
+		return nil, nil
+	}
+	deployment := &appsv1.Deployment{}
+	if err := t.kubeClient.Get(ctx, client.ObjectKey{Name: dpName, Namespace: pod.Namespace}, deployment); err != nil {
+		return nil, fmt.Errorf("get deployment, %w", err)
+	}
+
+	return deployment, nil
+}
+
+func (t *Terminator) RestartDeployments(ctx context.Context, deployments []*appsv1.Deployment, nodeName string) error {
+	for _, deployment := range deployments {
+		if deployment.Spec.Template.Annotations == nil {
+			deployment.Spec.Template.Annotations = make(map[string]string)
+		}
+		restartedNode, exists := deployment.Spec.Template.Annotations["kubectl.kubernetes.io/restartedNode"]
+		if exists && restartedNode == nodeName {
+			continue
+		}
+
+		deployment.Spec.Template.Annotations["kubectl.kubernetes.io/restartedNode"] = nodeName
+		if err := t.kubeClient.Update(ctx, deployment); err != nil {
+			return err
+		}
+
+	}
+	return nil
+}
+
+func (t *Terminator) GetRestartdeploymentsAndDrainPods(ctx context.Context, pods []*v1.Pod) ([]*appsv1.Deployment, []*v1.Pod, error) {
+
+	var drainPods []*v1.Pod
+	var restartDeployments []*appsv1.Deployment
+	nodeDeploymentReplicas := make(map[string]int32)
+
+	for _, pod := range pods {
+		deployment, err := t.GetDeploymentFromPod(ctx, pod)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		if deployment != nil {
+			nodeDeploymentReplicas[deployment.Namespace+"/"+deployment.Name] += 1
+		}
+	}
+
+	for _, pod := range pods {
+		deployment, err := t.GetDeploymentFromPod(ctx, pod)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		if deployment != nil && nodeDeploymentReplicas[deployment.Namespace+"/"+deployment.Name] == *deployment.Spec.Replicas {
+			restartDeployments = append(restartDeployments, deployment)
+		} else {
+			drainPods = append(drainPods, pod)
+		}
+	}
+
+	return restartDeployments, drainPods, nil
 }
