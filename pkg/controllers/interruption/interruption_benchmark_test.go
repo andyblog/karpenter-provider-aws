@@ -36,14 +36,16 @@ import (
 	"github.com/samber/lo"
 	"go.uber.org/multierr"
 	"go.uber.org/zap"
-	corev1 "k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/util/workqueue"
 	clock "k8s.io/utils/clock/testing"
 	controllerruntime "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
-	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
+	"sigs.k8s.io/karpenter/pkg/apis/v1beta1"
+
+	"sigs.k8s.io/karpenter/pkg/operator/scheme"
 
 	awscache "github.com/aws/karpenter-provider-aws/pkg/cache"
 	"github.com/aws/karpenter-provider-aws/pkg/controllers/interruption"
@@ -85,7 +87,7 @@ func benchmarkNotificationController(b *testing.B, messageCount int) {
 		IsolatedVPC:       lo.ToPtr(true),
 		InterruptionQueue: lo.ToPtr("test-cluster"),
 	}))
-	env = coretest.NewEnvironment()
+	env = coretest.NewEnvironment(scheme.Scheme)
 	// Stop the coretest environment after the coretest completes
 	defer func() {
 		if err := retry.Do(func() error {
@@ -232,7 +234,7 @@ func (p *providerSet) monitorMessagesProcessed(ctx context.Context, eventRecorde
 	return done
 }
 
-func provisionNodes(ctx context.Context, kubeClient client.Client, nodes []*corev1.Node) error {
+func provisionNodes(ctx context.Context, kubeClient client.Client, nodes []*v1.Node) error {
 	errs := make([]error, len(nodes))
 	workqueue.ParallelizeUntil(ctx, 20, len(nodes), func(i int) {
 		if err := retry.Do(func() error {
@@ -244,9 +246,9 @@ func provisionNodes(ctx context.Context, kubeClient client.Client, nodes []*core
 	return multierr.Combine(errs...)
 }
 
-func makeDiverseMessagesAndNodes(count int) ([]interface{}, []*corev1.Node) {
+func makeDiverseMessagesAndNodes(count int) ([]interface{}, []*v1.Node) {
 	var messages []interface{}
-	var nodes []*corev1.Node
+	var nodes []*v1.Node
 
 	newMessages, newNodes := makeScheduledChangeMessagesAndNodes(count / 3)
 	messages = append(messages, newMessages...)
@@ -265,16 +267,16 @@ func makeDiverseMessagesAndNodes(count int) ([]interface{}, []*corev1.Node) {
 	return messages, nodes
 }
 
-func makeScheduledChangeMessagesAndNodes(count int) ([]interface{}, []*corev1.Node) {
+func makeScheduledChangeMessagesAndNodes(count int) ([]interface{}, []*v1.Node) {
 	var msgs []interface{}
-	var nodes []*corev1.Node
+	var nodes []*v1.Node
 	for i := 0; i < count; i++ {
 		instanceID := fake.InstanceID()
 		msgs = append(msgs, scheduledChangeMessage(instanceID))
 		nodes = append(nodes, coretest.Node(coretest.NodeOptions{
 			ObjectMeta: metav1.ObjectMeta{
 				Labels: map[string]string{
-					karpv1.NodePoolLabelKey: "default",
+					v1beta1.NodePoolLabelKey: "default",
 				},
 			},
 			ProviderID: fake.ProviderID(instanceID),
@@ -283,9 +285,9 @@ func makeScheduledChangeMessagesAndNodes(count int) ([]interface{}, []*corev1.No
 	return msgs, nodes
 }
 
-func makeStateChangeMessagesAndNodes(count int, states []string) ([]interface{}, []*corev1.Node) {
+func makeStateChangeMessagesAndNodes(count int, states []string) ([]interface{}, []*v1.Node) {
 	var msgs []interface{}
-	var nodes []*corev1.Node
+	var nodes []*v1.Node
 	for i := 0; i < count; i++ {
 		state := states[r.Intn(len(states))]
 		instanceID := fake.InstanceID()
@@ -293,7 +295,7 @@ func makeStateChangeMessagesAndNodes(count int, states []string) ([]interface{},
 		nodes = append(nodes, coretest.Node(coretest.NodeOptions{
 			ObjectMeta: metav1.ObjectMeta{
 				Labels: map[string]string{
-					karpv1.NodePoolLabelKey: "default",
+					v1beta1.NodePoolLabelKey: "default",
 				},
 			},
 			ProviderID: fake.ProviderID(instanceID),
@@ -302,16 +304,16 @@ func makeStateChangeMessagesAndNodes(count int, states []string) ([]interface{},
 	return msgs, nodes
 }
 
-func makeSpotInterruptionMessagesAndNodes(count int) ([]interface{}, []*corev1.Node) {
+func makeSpotInterruptionMessagesAndNodes(count int) ([]interface{}, []*v1.Node) {
 	var msgs []interface{}
-	var nodes []*corev1.Node
+	var nodes []*v1.Node
 	for i := 0; i < count; i++ {
 		instanceID := fake.InstanceID()
 		msgs = append(msgs, spotInterruptionMessage(instanceID))
 		nodes = append(nodes, coretest.Node(coretest.NodeOptions{
 			ObjectMeta: metav1.ObjectMeta{
 				Labels: map[string]string{
-					karpv1.NodePoolLabelKey: "default",
+					v1beta1.NodePoolLabelKey: "default",
 				},
 			},
 			ProviderID: fake.ProviderID(instanceID),

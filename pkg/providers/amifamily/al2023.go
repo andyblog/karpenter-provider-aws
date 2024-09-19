@@ -15,19 +15,16 @@ limitations under the License.
 package amifamily
 
 import (
-	"context"
 	"fmt"
 
 	"github.com/samber/lo"
-	corev1 "k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
+	corev1beta1 "sigs.k8s.io/karpenter/pkg/apis/v1beta1"
 	"sigs.k8s.io/karpenter/pkg/cloudprovider"
 	"sigs.k8s.io/karpenter/pkg/scheduling"
 
-	"github.com/aws/aws-sdk-go/service/ec2"
-
-	v1 "github.com/aws/karpenter-provider-aws/pkg/apis/v1"
+	"github.com/aws/karpenter-provider-aws/pkg/apis/v1beta1"
 	"github.com/aws/karpenter-provider-aws/pkg/providers/amifamily/bootstrap"
-	"github.com/aws/karpenter-provider-aws/pkg/providers/ssm"
 )
 
 type AL2023 struct {
@@ -35,47 +32,24 @@ type AL2023 struct {
 	*Options
 }
 
-func (a AL2023) DescribeImageQuery(ctx context.Context, ssmProvider ssm.Provider, k8sVersion string, amiVersion string) (DescribeImageQuery, error) {
-	ids := map[string]Variant{}
-	for arch, variants := range map[string][]Variant{
-		"x86_64": []Variant{VariantStandard, VariantNvidia, VariantNeuron},
-		"arm64":  []Variant{VariantStandard},
-	} {
-		for _, variant := range variants {
-			path := a.resolvePath(arch, string(variant), k8sVersion, amiVersion)
-			imageID, err := ssmProvider.Get(ctx, path)
-			if err != nil {
-				continue
-			}
-			ids[imageID] = variant
-		}
+func (a AL2023) DefaultAMIs(version string) []DefaultAMIOutput {
+	return []DefaultAMIOutput{
+		{
+			Query: fmt.Sprintf("/aws/service/eks/optimized-ami/%s/amazon-linux-2023/x86_64/standard/recommended/image_id", version),
+			Requirements: scheduling.NewRequirements(
+				scheduling.NewRequirement(v1.LabelArchStable, v1.NodeSelectorOpIn, corev1beta1.ArchitectureAmd64),
+			),
+		},
+		{
+			Query: fmt.Sprintf("/aws/service/eks/optimized-ami/%s/amazon-linux-2023/arm64/standard/recommended/image_id", version),
+			Requirements: scheduling.NewRequirements(
+				scheduling.NewRequirement(v1.LabelArchStable, v1.NodeSelectorOpIn, corev1beta1.ArchitectureArm64),
+			),
+		},
 	}
-	// Failed to discover any AMIs, we should short circuit AMI discovery
-	if len(ids) == 0 {
-		return DescribeImageQuery{}, fmt.Errorf(`failed to discover AMIs for alias "al2023@%s"`, amiVersion)
-	}
-
-	return DescribeImageQuery{
-		Filters: []*ec2.Filter{{
-			Name:   lo.ToPtr("image-id"),
-			Values: lo.ToSlicePtr(lo.Keys(ids)),
-		}},
-		KnownRequirements: lo.MapValues(ids, func(v Variant, _ string) []scheduling.Requirements {
-			return []scheduling.Requirements{v.Requirements()}
-		}),
-	}, nil
 }
 
-func (a AL2023) resolvePath(architecture, variant, k8sVersion, amiVersion string) string {
-	name := lo.Ternary(
-		amiVersion == AMIVersionLatest,
-		"recommended",
-		fmt.Sprintf("amazon-eks-node-al2023-%s-%s-%s-%s", architecture, variant, k8sVersion, amiVersion),
-	)
-	return fmt.Sprintf("/aws/service/eks/optimized-ami/%s/amazon-linux-2023/%s/%s/%s/image_id", k8sVersion, architecture, variant, name)
-}
-
-func (a AL2023) UserData(kubeletConfig *v1.KubeletConfiguration, taints []corev1.Taint, labels map[string]string, caBundle *string, _ []*cloudprovider.InstanceType, customUserData *string, instanceStorePolicy *v1.InstanceStorePolicy) bootstrap.Bootstrapper {
+func (a AL2023) UserData(kubeletConfig *corev1beta1.KubeletConfiguration, taints []v1.Taint, labels map[string]string, caBundle *string, _ []*cloudprovider.InstanceType, customUserData *string, instanceStorePolicy *v1beta1.InstanceStorePolicy) bootstrap.Bootstrapper {
 	return bootstrap.Nodeadm{
 		Options: bootstrap.Options{
 			ClusterName:             a.Options.ClusterName,
@@ -93,8 +67,8 @@ func (a AL2023) UserData(kubeletConfig *v1.KubeletConfiguration, taints []corev1
 }
 
 // DefaultBlockDeviceMappings returns the default block device mappings for the AMI Family
-func (a AL2023) DefaultBlockDeviceMappings() []*v1.BlockDeviceMapping {
-	return []*v1.BlockDeviceMapping{{
+func (a AL2023) DefaultBlockDeviceMappings() []*v1beta1.BlockDeviceMapping {
+	return []*v1beta1.BlockDeviceMapping{{
 		DeviceName: a.EphemeralBlockDevice(),
 		EBS:        &DefaultEBS,
 	}}

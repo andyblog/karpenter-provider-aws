@@ -24,20 +24,14 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/awslabs/operatorpkg/status"
-
 	"github.com/samber/lo"
-	corev1 "k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/sets"
 
-	v1 "sigs.k8s.io/karpenter/pkg/apis/v1"
+	"sigs.k8s.io/karpenter/pkg/apis/v1beta1"
 	"sigs.k8s.io/karpenter/pkg/scheduling"
 	"sigs.k8s.io/karpenter/pkg/utils/resources"
-)
-
-var (
-	SpotRequirement     = scheduling.NewRequirements(scheduling.NewRequirement(v1.CapacityTypeLabelKey, corev1.NodeSelectorOpIn, v1.CapacityTypeSpot))
-	OnDemandRequirement = scheduling.NewRequirements(scheduling.NewRequirement(v1.CapacityTypeLabelKey, corev1.NodeSelectorOpIn, v1.CapacityTypeOnDemand))
 )
 
 type DriftReason string
@@ -46,32 +40,31 @@ type DriftReason string
 type CloudProvider interface {
 	// Create launches a NodeClaim with the given resource requests and requirements and returns a hydrated
 	// NodeClaim back with resolved NodeClaim labels for the launched NodeClaim
-	Create(context.Context, *v1.NodeClaim) (*v1.NodeClaim, error)
+	Create(context.Context, *v1beta1.NodeClaim) (*v1beta1.NodeClaim, error)
 	// Delete removes a NodeClaim from the cloudprovider by its provider id
-	Delete(context.Context, *v1.NodeClaim) error
+	Delete(context.Context, *v1beta1.NodeClaim) error
 	// Get retrieves a NodeClaim from the cloudprovider by its provider id
-	Get(context.Context, string) (*v1.NodeClaim, error)
+	Get(context.Context, string) (*v1beta1.NodeClaim, error)
 	// List retrieves all NodeClaims from the cloudprovider
-	List(context.Context) ([]*v1.NodeClaim, error)
+	List(context.Context) ([]*v1beta1.NodeClaim, error)
 	// GetInstanceTypes returns instance types supported by the cloudprovider.
 	// Availability of types or zone may vary by nodepool or over time.  Regardless of
 	// availability, the GetInstanceTypes method should always return all instance types,
 	// even those with no offerings available.
-	GetInstanceTypes(context.Context, *v1.NodePool) ([]*InstanceType, error)
+	GetInstanceTypes(context.Context, *v1beta1.NodePool) ([]*InstanceType, error)
 	// IsDrifted returns whether a NodeClaim has drifted from the provisioning requirements
 	// it is tied to.
-	IsDrifted(context.Context, *v1.NodeClaim) (DriftReason, error)
+	IsDrifted(context.Context, *v1beta1.NodeClaim) (DriftReason, error)
 	// Name returns the CloudProvider implementation name.
 	Name() string
-	// GetSupportedNodeClasses returns CloudProvider NodeClass that implements status.Object
-	// NOTE: It returns a list where the first element should be the default NodeClass
-	GetSupportedNodeClasses() []status.Object
+	// GetSupportedNodeClass returns the group, version, and kind of the CloudProvider NodeClass
+	GetSupportedNodeClasses() []schema.GroupVersionKind
 }
 
 // InstanceType describes the properties of a potential node (either concrete attributes of an instance of this type
 // or supported options in the case of arrays)
 type InstanceType struct {
-	// Name of the instance type, must correspond to corev1.LabelInstanceTypeStable
+	// Name of the instance type, must correspond to v1.LabelInstanceTypeStable
 	Name string
 	// Requirements returns a flexible set of properties that may be selected
 	// for scheduling. Must be defined for every well known label, even if empty.
@@ -79,13 +72,13 @@ type InstanceType struct {
 	// Note that though this is an array it is expected that all the Offerings are unique from one another
 	Offerings Offerings
 	// Resources are the full resource capacities for this instance type
-	Capacity corev1.ResourceList
+	Capacity v1.ResourceList
 	// Overhead is the amount of resource overhead expected to be used by kubelet and any other system daemons outside
 	// of Kubernetes.
 	Overhead *InstanceTypeOverhead
 
 	once        sync.Once
-	allocatable corev1.ResourceList
+	allocatable v1.ResourceList
 }
 
 type InstanceTypes []*InstanceType
@@ -96,7 +89,7 @@ func (i *InstanceType) precompute() {
 	i.allocatable = resources.Subtract(i.Capacity, i.Overhead.Total())
 }
 
-func (i *InstanceType) Allocatable() corev1.ResourceList {
+func (i *InstanceType) Allocatable() v1.ResourceList {
 	i.once.Do(i.precompute)
 	return i.allocatable.DeepCopy()
 }
@@ -106,11 +99,11 @@ func (its InstanceTypes) OrderByPrice(reqs scheduling.Requirements) InstanceType
 	sort.Slice(its, func(i, j int) bool {
 		iPrice := math.MaxFloat64
 		jPrice := math.MaxFloat64
-		if ofs := its[i].Offerings.Available().Compatible(reqs); len(ofs) > 0 {
-			iPrice = ofs.Cheapest().Price
+		if len(its[i].Offerings.Available().Compatible(reqs)) > 0 {
+			iPrice = its[i].Offerings.Available().Compatible(reqs).Cheapest().Price
 		}
-		if ofs := its[j].Offerings.Available().Compatible(reqs); len(ofs) > 0 {
-			jPrice = ofs.Cheapest().Price
+		if len(its[j].Offerings.Available().Compatible(reqs)) > 0 {
+			jPrice = its[j].Offerings.Available().Compatible(reqs).Cheapest().Price
 		}
 		if iPrice == jPrice {
 			return its[i].Name < its[j].Name
@@ -124,7 +117,7 @@ func (its InstanceTypes) OrderByPrice(reqs scheduling.Requirements) InstanceType
 func (its InstanceTypes) Compatible(requirements scheduling.Requirements) InstanceTypes {
 	var filteredInstanceTypes []*InstanceType
 	for _, instanceType := range its {
-		if instanceType.Offerings.Available().HasCompatible(requirements) {
+		if len(instanceType.Offerings.Available().Compatible(requirements)) > 0 {
 			filteredInstanceTypes = append(filteredInstanceTypes, instanceType)
 		}
 	}
@@ -163,9 +156,6 @@ func (its InstanceTypes) Compatible(requirements scheduling.Requirements) Instan
 //		}
 //	  so it returns 3 and a non-nil error to indicate that the instance types weren't able to fulfill the minValues requirements
 func (its InstanceTypes) SatisfiesMinValues(requirements scheduling.Requirements) (minNeededInstanceTypes int, err error) {
-	if !requirements.HasMinValues() {
-		return 0, nil
-	}
 	valuesForKey := map[string]sets.Set[string]{}
 	// We validate if sorting by price and truncating the number of instance types to minItems breaks the minValue requirement.
 	// If minValue requirement fails, we return an error that indicates the first requirement key that couldn't be satisfied.
@@ -201,7 +191,7 @@ func (its InstanceTypes) SatisfiesMinValues(requirements scheduling.Requirements
 // Truncate truncates the InstanceTypes based on the passed-in requirements
 // It returns an error if it isn't possible to truncate the instance types on maxItems without violating minValues
 func (its InstanceTypes) Truncate(requirements scheduling.Requirements, maxItems int) (InstanceTypes, error) {
-	truncatedInstanceTypes := lo.Slice(its.OrderByPrice(requirements), 0, maxItems)
+	truncatedInstanceTypes := InstanceTypes(lo.Slice(its.OrderByPrice(requirements), 0, maxItems))
 	// Only check for a validity of NodeClaim if its requirement has minValues in it.
 	if requirements.HasMinValues() {
 		if _, err := truncatedInstanceTypes.SatisfiesMinValues(requirements); err != nil {
@@ -213,21 +203,21 @@ func (its InstanceTypes) Truncate(requirements scheduling.Requirements, maxItems
 
 type InstanceTypeOverhead struct {
 	// KubeReserved returns the default resources allocated to kubernetes system daemons by default
-	KubeReserved corev1.ResourceList
+	KubeReserved v1.ResourceList
 	// SystemReserved returns the default resources allocated to the OS system daemons by default
-	SystemReserved corev1.ResourceList
+	SystemReserved v1.ResourceList
 	// EvictionThreshold returns the resources used to maintain a hard eviction threshold
-	EvictionThreshold corev1.ResourceList
+	EvictionThreshold v1.ResourceList
 }
 
-func (i InstanceTypeOverhead) Total() corev1.ResourceList {
+func (i InstanceTypeOverhead) Total() v1.ResourceList {
 	return resources.Merge(i.KubeReserved, i.SystemReserved, i.EvictionThreshold)
 }
 
 // An Offering describes where an InstanceType is available to be used, with the expectation that its properties
 // may be tightly coupled (e.g. the availability of an instance type in some zone is scoped to a capacity type) and
 // these properties are captured with labels in Requirements.
-// Requirements are required to contain the keys v1.CapacityTypeLabelKey and corev1.LabelTopologyZone
+// Requirements are required to contain the keys v1beta1.CapacityTypeLabelKey and v1.LabelTopologyZone
 type Offering struct {
 	Requirements scheduling.Requirements
 	Price        float64
@@ -237,6 +227,14 @@ type Offering struct {
 }
 
 type Offerings []Offering
+
+// Get gets the offering from an offering slice that matches the
+// passed zone, capacityType, and other constraints
+func (ofs Offerings) Get(reqs scheduling.Requirements) (Offering, bool) {
+	return lo.Find(ofs, func(of Offering) bool {
+		return reqs.Compatible(of.Requirements, scheduling.AllowUndefinedWellKnownLabels) == nil
+	})
+}
 
 // Available filters the available offerings from the returned offerings
 func (ofs Offerings) Available() Offerings {
@@ -248,18 +246,8 @@ func (ofs Offerings) Available() Offerings {
 // Compatible returns the offerings based on the passed requirements
 func (ofs Offerings) Compatible(reqs scheduling.Requirements) Offerings {
 	return lo.Filter(ofs, func(offering Offering, _ int) bool {
-		return reqs.IsCompatible(offering.Requirements, scheduling.AllowUndefinedWellKnownLabels)
+		return reqs.Compatible(offering.Requirements, scheduling.AllowUndefinedWellKnownLabels) == nil
 	})
-}
-
-// HasCompatible returns whether there is a compatible offering based on the passed requirements
-func (ofs Offerings) HasCompatible(reqs scheduling.Requirements) bool {
-	for _, of := range ofs {
-		if reqs.IsCompatible(of.Requirements, scheduling.AllowUndefinedWellKnownLabels) {
-			return true
-		}
-	}
-	return false
 }
 
 // Cheapest returns the cheapest offering from the returned offerings
@@ -274,26 +262,6 @@ func (ofs Offerings) MostExpensive() Offering {
 	return lo.MaxBy(ofs, func(a, b Offering) bool {
 		return a.Price > b.Price
 	})
-}
-
-// WorstLaunchPrice gets the worst-case launch price from the offerings that are offered
-// on an instance type. If the instance type has a spot offering available, then it uses the spot offering
-// to get the launch price; else, it uses the on-demand launch price
-func (ofs Offerings) WorstLaunchPrice(reqs scheduling.Requirements) float64 {
-	// We prefer to launch spot offerings, so we will get the worst price based on the node requirements
-	if reqs.Get(v1.CapacityTypeLabelKey).Has(v1.CapacityTypeSpot) {
-		spotOfferings := ofs.Compatible(reqs).Compatible(SpotRequirement)
-		if len(spotOfferings) > 0 {
-			return spotOfferings.MostExpensive().Price
-		}
-	}
-	if reqs.Get(v1.CapacityTypeLabelKey).Has(v1.CapacityTypeOnDemand) {
-		onDemandOfferings := ofs.Compatible(reqs).Compatible(OnDemandRequirement)
-		if len(onDemandOfferings) > 0 {
-			return onDemandOfferings.MostExpensive().Price
-		}
-	}
-	return math.MaxFloat64
 }
 
 // NodeClaimNotFoundError is an error type returned by CloudProviders when the reason for failure is NotFound
@@ -349,6 +317,13 @@ func IsInsufficientCapacityError(err error) bool {
 	return errors.As(err, &icErr)
 }
 
+func IgnoreInsufficientCapacityError(err error) error {
+	if IsInsufficientCapacityError(err) {
+		return nil
+	}
+	return err
+}
+
 // NodeClassNotReadyError is an error type returned by CloudProviders when a NodeClass that is used by the launch process doesn't have all its resolved fields
 type NodeClassNotReadyError struct {
 	error
@@ -370,4 +345,11 @@ func IsNodeClassNotReadyError(err error) bool {
 	}
 	var nrError *NodeClassNotReadyError
 	return errors.As(err, &nrError)
+}
+
+func IgnoreNodeClassNotReadyError(err error) error {
+	if IsNodeClassNotReadyError(err) {
+		return nil
+	}
+	return err
 }

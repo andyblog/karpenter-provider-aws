@@ -19,13 +19,23 @@ package apis
 import (
 	_ "embed"
 
-	"github.com/awslabs/operatorpkg/object"
+	"github.com/samber/lo"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+
+	v1 "sigs.k8s.io/karpenter/pkg/apis/v1"
+	"sigs.k8s.io/karpenter/pkg/apis/v1beta1"
+	"sigs.k8s.io/karpenter/pkg/utils/functional"
 )
 
-const (
-	Group              = "karpenter.sh"
-	CompatibilityGroup = "compatibility." + Group
+var (
+	// Builder includes all types within the apis package
+	Builder = runtime.NewSchemeBuilder(
+		v1.SchemeBuilder.AddToScheme,
+		v1beta1.SchemeBuilder.AddToScheme,
+	)
+	// AddToScheme may be used to add all resources defined in the project to a Scheme
+	AddToScheme = Builder.AddToScheme
 )
 
 //go:generate controller-gen crd object:headerFile="../../hack/boilerplate.go.txt" paths="./..." output:crd:artifacts:config=crds
@@ -35,7 +45,7 @@ var (
 	//go:embed crds/karpenter.sh_nodeclaims.yaml
 	NodeClaimCRD []byte
 	CRDs         = []*apiextensionsv1.CustomResourceDefinition{
-		object.Unmarshal[apiextensionsv1.CustomResourceDefinition](NodePoolCRD),
-		object.Unmarshal[apiextensionsv1.CustomResourceDefinition](NodeClaimCRD),
+		lo.Must(functional.Unmarshal[apiextensionsv1.CustomResourceDefinition](NodePoolCRD)),
+		lo.Must(functional.Unmarshal[apiextensionsv1.CustomResourceDefinition](NodeClaimCRD)),
 	}
 )

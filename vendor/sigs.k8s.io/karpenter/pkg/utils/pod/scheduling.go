@@ -19,18 +19,19 @@ package pod
 import (
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/utils/clock"
 
-	v1 "sigs.k8s.io/karpenter/pkg/apis/v1"
+	"sigs.k8s.io/karpenter/pkg/apis/v1alpha5"
+	"sigs.k8s.io/karpenter/pkg/apis/v1beta1"
 	"sigs.k8s.io/karpenter/pkg/scheduling"
 )
 
 // IsActive checks if Karpenter should consider this pod as running by ensuring that the pod:
 // - Isn't a terminal pod (Failed or Succeeded)
 // - Isn't actively terminating
-func IsActive(pod *corev1.Pod) bool {
+func IsActive(pod *v1.Pod) bool {
 	return !IsTerminal(pod) &&
 		!IsTerminating(pod)
 }
@@ -39,7 +40,7 @@ func IsActive(pod *corev1.Pod) bool {
 // - Is an active pod (isn't terminal or actively terminating) OR Is owned by a StatefulSet and Is Terminating
 // - Isn't owned by a DaemonSet
 // - Isn't a mirror pod (https://kubernetes.io/docs/tasks/configure-pod-container/static-pod/)
-func IsReschedulable(pod *corev1.Pod) bool {
+func IsReschedulable(pod *v1.Pod) bool {
 	// StatefulSet pods can be handled differently here because we know that StatefulSet pods MUST
 	// get deleted before new pods are re-created. This means that we can model terminating pods for StatefulSets
 	// differently for higher availability by considering terminating pods for scheduling
@@ -52,30 +53,21 @@ func IsReschedulable(pod *corev1.Pod) bool {
 // - Is an active pod (isn't terminal or actively terminating)
 // - Doesn't tolerate the "karpenter.sh/disruption=disrupting" taint
 // - Isn't a mirror pod (https://kubernetes.io/docs/tasks/configure-pod-container/static-pod/)
-// - Does not have the "karpenter.sh/do-not-disrupt=true" annotation (https://karpenter.sh/docs/concepts/disruption/#pod-level-controls)
-func IsEvictable(pod *corev1.Pod) bool {
+func IsEvictable(pod *v1.Pod) bool {
 	return IsActive(pod) &&
-		!ToleratesDisruptedNoScheduleTaint(pod) &&
-		!IsOwnedByNode(pod) &&
-		!HasDoNotDisrupt(pod)
+		!ToleratesDisruptionNoScheduleTaint(pod) &&
+		!IsOwnedByNode(pod)
 }
 
 // IsWaitingEviction checks if this is a pod that we are waiting to be removed from the node by ensuring that the pod:
 // - Isn't a terminal pod (Failed or Succeeded)
-// - Can be drained by Karpenter (See IsDrainable)
-func IsWaitingEviction(pod *corev1.Pod, clk clock.Clock) bool {
-	return !IsTerminal(pod) &&
-		IsDrainable(pod, clk)
-}
-
-// IsDrainable checks if a pod can be drained by Karpenter by ensuring that the pod:
-// - Doesn't tolerate the "karpenter.sh/disruption=disrupting" taint
 // - Isn't a pod that has been terminating past its terminationGracePeriodSeconds
+// - Doesn't tolerate the "karpenter.sh/disruption=disrupting" taint
 // - Isn't a mirror pod (https://kubernetes.io/docs/tasks/configure-pod-container/static-pod/)
-// Note: pods with the `karpenter.sh/do-not-disrupt` annotation are included since node drain should stall until these pods are evicted or become terminal, even though Karpenter won't orchestrate the eviction.
-func IsDrainable(pod *corev1.Pod, clk clock.Clock) bool {
-	return !ToleratesDisruptedNoScheduleTaint(pod) &&
+func IsWaitingEviction(pod *v1.Pod, clk clock.Clock) bool {
+	return !IsTerminal(pod) &&
 		!IsStuckTerminating(pod, clk) &&
+		!ToleratesDisruptionNoScheduleTaint(pod) &&
 		// Mirror pods cannot be deleted through the API server since they are created and managed by kubelet
 		// This means they are effectively read-only and can't be controlled by API server calls
 		// https://kubernetes.io/docs/reference/generated/kubectl/kubectl-commands#drain
@@ -88,7 +80,7 @@ func IsDrainable(pod *corev1.Pod, clk clock.Clock) bool {
 // - Isn't currently preempting other pods on the cluster and about to schedule
 // - Isn't owned by a DaemonSet
 // - Isn't a mirror pod (https://kubernetes.io/docs/tasks/configure-pod-container/static-pod/)
-func IsProvisionable(pod *corev1.Pod) bool {
+func IsProvisionable(pod *v1.Pod) bool {
 	return FailedToSchedule(pod) &&
 		!IsScheduled(pod) &&
 		!IsPreempting(pod) &&
@@ -100,7 +92,7 @@ func IsProvisionable(pod *corev1.Pod) bool {
 // It checks whether the following is true for the pod:
 // - Has the `karpenter.sh/do-not-disrupt` annotation
 // - Is an actively running pod
-func IsDisruptable(pod *corev1.Pod) bool {
+func IsDisruptable(pod *v1.Pod) bool {
 	return !(IsActive(pod) && HasDoNotDisrupt(pod))
 }
 
@@ -110,32 +102,32 @@ func IsDisruptable(pod *corev1.Pod) bool {
 // Note that it's possible that other schedulers may be scheduling another pod and may have a different
 // semantic (e.g. Fargate on AWS marks with MATCH_NODE_SELECTOR_FAILED). If that's the case, Karpenter
 // won't react to this pod because the scheduler didn't add this specific condition.
-func FailedToSchedule(pod *corev1.Pod) bool {
+func FailedToSchedule(pod *v1.Pod) bool {
 	for _, condition := range pod.Status.Conditions {
-		if condition.Type == corev1.PodScheduled && condition.Reason == corev1.PodReasonUnschedulable {
+		if condition.Type == v1.PodScheduled && condition.Reason == v1.PodReasonUnschedulable {
 			return true
 		}
 	}
 	return false
 }
 
-func IsScheduled(pod *corev1.Pod) bool {
+func IsScheduled(pod *v1.Pod) bool {
 	return pod.Spec.NodeName != ""
 }
 
-func IsPreempting(pod *corev1.Pod) bool {
+func IsPreempting(pod *v1.Pod) bool {
 	return pod.Status.NominatedNodeName != ""
 }
 
-func IsTerminal(pod *corev1.Pod) bool {
-	return pod.Status.Phase == corev1.PodFailed || pod.Status.Phase == corev1.PodSucceeded
+func IsTerminal(pod *v1.Pod) bool {
+	return pod.Status.Phase == v1.PodFailed || pod.Status.Phase == v1.PodSucceeded
 }
 
-func IsTerminating(pod *corev1.Pod) bool {
+func IsTerminating(pod *v1.Pod) bool {
 	return pod.DeletionTimestamp != nil
 }
 
-func IsStuckTerminating(pod *corev1.Pod, clk clock.Clock) bool {
+func IsStuckTerminating(pod *v1.Pod, clk clock.Clock) bool {
 	// The pod DeletionTimestamp will be set to the time the pod was deleted plus its
 	// grace period in seconds. We give an additional minute as a buffer to allow
 	// pods to force delete off the node before we actually go and terminate the node
@@ -143,26 +135,26 @@ func IsStuckTerminating(pod *corev1.Pod, clk clock.Clock) bool {
 	return IsTerminating(pod) && clk.Since(pod.DeletionTimestamp.Time) > time.Minute
 }
 
-func IsOwnedByStatefulSet(pod *corev1.Pod) bool {
+func IsOwnedByStatefulSet(pod *v1.Pod) bool {
 	return IsOwnedBy(pod, []schema.GroupVersionKind{
 		{Group: "apps", Version: "v1", Kind: "StatefulSet"},
 	})
 }
 
-func IsOwnedByDaemonSet(pod *corev1.Pod) bool {
+func IsOwnedByDaemonSet(pod *v1.Pod) bool {
 	return IsOwnedBy(pod, []schema.GroupVersionKind{
 		{Group: "apps", Version: "v1", Kind: "DaemonSet"},
 	})
 }
 
 // IsOwnedByNode returns true if the pod is a static pod owned by a specific node
-func IsOwnedByNode(pod *corev1.Pod) bool {
+func IsOwnedByNode(pod *v1.Pod) bool {
 	return IsOwnedBy(pod, []schema.GroupVersionKind{
 		{Version: "v1", Kind: "Node"},
 	})
 }
 
-func IsOwnedBy(pod *corev1.Pod, gvks []schema.GroupVersionKind) bool {
+func IsOwnedBy(pod *v1.Pod, gvks []schema.GroupVersionKind) bool {
 	for _, ignoredOwner := range gvks {
 		for _, owner := range pod.ObjectMeta.OwnerReferences {
 			if owner.APIVersion == ignoredOwner.GroupVersion().String() && owner.Kind == ignoredOwner.Kind {
@@ -173,27 +165,29 @@ func IsOwnedBy(pod *corev1.Pod, gvks []schema.GroupVersionKind) bool {
 	return false
 }
 
-func HasDoNotDisrupt(pod *corev1.Pod) bool {
+func HasDoNotDisrupt(pod *v1.Pod) bool {
 	if pod.Annotations == nil {
 		return false
 	}
-	return pod.Annotations[v1.DoNotDisruptAnnotationKey] == "true"
+	// TODO Remove checking do-not-evict as part of v1
+	return pod.Annotations[v1alpha5.DoNotEvictPodAnnotationKey] == "true" ||
+		pod.Annotations[v1beta1.DoNotDisruptAnnotationKey] == "true"
 }
 
-// ToleratesDisruptedNoScheduleTaint returns true if the pod tolerates karpenter.sh/disrupted:NoSchedule taint
-func ToleratesDisruptedNoScheduleTaint(pod *corev1.Pod) bool {
-	return scheduling.Taints([]corev1.Taint{v1.DisruptedNoScheduleTaint}).Tolerates(pod) == nil
+// ToleratesDisruptionNoScheduleTaint returns true if the pod tolerates karpenter.sh/disruption:NoSchedule=Disrupting taint
+func ToleratesDisruptionNoScheduleTaint(pod *v1.Pod) bool {
+	return scheduling.Taints([]v1.Taint{v1beta1.DisruptionNoScheduleTaint}).Tolerates(pod) == nil
 }
 
 // HasRequiredPodAntiAffinity returns true if a non-empty PodAntiAffinity/RequiredDuringSchedulingIgnoredDuringExecution
 // is defined in the pod spec
-func HasRequiredPodAntiAffinity(pod *corev1.Pod) bool {
+func HasRequiredPodAntiAffinity(pod *v1.Pod) bool {
 	return HasPodAntiAffinity(pod) &&
 		len(pod.Spec.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution) != 0
 }
 
 // HasPodAntiAffinity returns true if a non-empty PodAntiAffinity is defined in the pod spec
-func HasPodAntiAffinity(pod *corev1.Pod) bool {
+func HasPodAntiAffinity(pod *v1.Pod) bool {
 	return pod.Spec.Affinity != nil && pod.Spec.Affinity.PodAntiAffinity != nil &&
 		(len(pod.Spec.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution) != 0 ||
 			len(pod.Spec.Affinity.PodAntiAffinity.PreferredDuringSchedulingIgnoredDuringExecution) != 0)

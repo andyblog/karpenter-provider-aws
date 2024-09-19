@@ -17,15 +17,10 @@ limitations under the License.
 package controllers
 
 import (
-	"github.com/awslabs/operatorpkg/controller"
-	"github.com/awslabs/operatorpkg/status"
 	"k8s.io/utils/clock"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/manager"
 
-	v1 "sigs.k8s.io/karpenter/pkg/apis/v1"
-
-	nodepoolreadiness "sigs.k8s.io/karpenter/pkg/controllers/nodepool/readiness"
+	"sigs.k8s.io/karpenter/pkg/operator/controller"
 
 	"sigs.k8s.io/karpenter/pkg/cloudprovider"
 	"sigs.k8s.io/karpenter/pkg/controllers/disruption"
@@ -38,14 +33,11 @@ import (
 	"sigs.k8s.io/karpenter/pkg/controllers/node/termination/terminator"
 	nodeclaimconsistency "sigs.k8s.io/karpenter/pkg/controllers/nodeclaim/consistency"
 	nodeclaimdisruption "sigs.k8s.io/karpenter/pkg/controllers/nodeclaim/disruption"
-	"sigs.k8s.io/karpenter/pkg/controllers/nodeclaim/expiration"
 	nodeclaimgarbagecollection "sigs.k8s.io/karpenter/pkg/controllers/nodeclaim/garbagecollection"
 	nodeclaimlifecycle "sigs.k8s.io/karpenter/pkg/controllers/nodeclaim/lifecycle"
-	podevents "sigs.k8s.io/karpenter/pkg/controllers/nodeclaim/podevents"
 	nodeclaimtermination "sigs.k8s.io/karpenter/pkg/controllers/nodeclaim/termination"
 	nodepoolcounter "sigs.k8s.io/karpenter/pkg/controllers/nodepool/counter"
 	nodepoolhash "sigs.k8s.io/karpenter/pkg/controllers/nodepool/hash"
-	nodepoolvalidation "sigs.k8s.io/karpenter/pkg/controllers/nodepool/validation"
 	"sigs.k8s.io/karpenter/pkg/controllers/provisioning"
 	"sigs.k8s.io/karpenter/pkg/controllers/state"
 	"sigs.k8s.io/karpenter/pkg/controllers/state/informer"
@@ -53,14 +45,13 @@ import (
 )
 
 func NewControllers(
-	mgr manager.Manager,
 	clock clock.Clock,
 	kubeClient client.Client,
+	cluster *state.Cluster,
 	recorder events.Recorder,
 	cloudProvider cloudprovider.CloudProvider,
 ) []controller.Controller {
 
-	cluster := state.NewCluster(clock, kubeClient)
 	p := provisioning.NewProvisioner(kubeClient, recorder, cloudProvider, cluster)
 	evictionQueue := terminator.NewQueue(kubeClient, recorder)
 	disruptionQueue := orchestration.NewQueue(kubeClient, recorder, cluster, clock, p)
@@ -68,30 +59,24 @@ func NewControllers(
 	return []controller.Controller{
 		p, evictionQueue, disruptionQueue,
 		disruption.NewController(clock, kubeClient, p, cloudProvider, recorder, cluster, disruptionQueue),
-		provisioning.NewPodController(kubeClient, p),
-		provisioning.NewNodeController(kubeClient, p),
+		provisioning.NewPodController(kubeClient, p, recorder),
+		provisioning.NewNodeController(kubeClient, p, recorder),
 		nodepoolhash.NewController(kubeClient),
-		expiration.NewController(clock, kubeClient),
 		informer.NewDaemonSetController(kubeClient, cluster),
 		informer.NewNodeController(kubeClient, cluster),
 		informer.NewPodController(kubeClient, cluster),
 		informer.NewNodePoolController(kubeClient, cluster),
 		informer.NewNodeClaimController(kubeClient, cluster),
-		termination.NewController(clock, kubeClient, cloudProvider, terminator.NewTerminator(clock, kubeClient, evictionQueue, recorder), recorder),
+		termination.NewController(kubeClient, cloudProvider, terminator.NewTerminator(clock, kubeClient, evictionQueue), recorder),
 		metricspod.NewController(kubeClient),
 		metricsnodepool.NewController(kubeClient),
 		metricsnode.NewController(cluster),
-		nodepoolreadiness.NewController(kubeClient, cloudProvider),
 		nodepoolcounter.NewController(kubeClient, cluster),
-		nodepoolvalidation.NewController(kubeClient),
-		podevents.NewController(clock, kubeClient),
 		nodeclaimconsistency.NewController(clock, kubeClient, recorder),
 		nodeclaimlifecycle.NewController(clock, kubeClient, cloudProvider, recorder),
 		nodeclaimgarbagecollection.NewController(clock, kubeClient, cloudProvider),
-		nodeclaimtermination.NewController(kubeClient, cloudProvider, recorder),
-		nodeclaimdisruption.NewController(clock, kubeClient, cloudProvider),
+		nodeclaimtermination.NewController(kubeClient, cloudProvider),
+		nodeclaimdisruption.NewController(clock, kubeClient, cluster, cloudProvider),
 		leasegarbagecollection.NewController(kubeClient),
-		status.NewController[*v1.NodeClaim](kubeClient, mgr.GetEventRecorderFor("karpenter")),
-		status.NewController[*v1.NodePool](kubeClient, mgr.GetEventRecorderFor("karpenter")),
 	}
 }

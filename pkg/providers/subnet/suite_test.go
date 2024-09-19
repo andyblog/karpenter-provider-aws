@@ -20,17 +20,17 @@ import (
 	"sync"
 	"testing"
 
-	"sigs.k8s.io/karpenter/pkg/test/v1alpha1"
-
+	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/ec2"
 	"github.com/samber/lo"
 
 	"github.com/aws/karpenter-provider-aws/pkg/apis"
-	v1 "github.com/aws/karpenter-provider-aws/pkg/apis/v1"
+	"github.com/aws/karpenter-provider-aws/pkg/apis/v1beta1"
 	"github.com/aws/karpenter-provider-aws/pkg/operator/options"
 	"github.com/aws/karpenter-provider-aws/pkg/test"
 
 	coreoptions "sigs.k8s.io/karpenter/pkg/operator/options"
+	"sigs.k8s.io/karpenter/pkg/operator/scheme"
 	coretest "sigs.k8s.io/karpenter/pkg/test"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -43,7 +43,7 @@ var ctx context.Context
 var stop context.CancelFunc
 var env *coretest.Environment
 var awsEnv *test.Environment
-var nodeClass *v1.EC2NodeClass
+var nodeClass *v1beta1.EC2NodeClass
 
 func TestAWS(t *testing.T) {
 	ctx = TestContextWithLogger(t)
@@ -52,7 +52,7 @@ func TestAWS(t *testing.T) {
 }
 
 var _ = BeforeSuite(func() {
-	env = coretest.NewEnvironment(coretest.WithCRDs(apis.CRDs...), coretest.WithCRDs(v1alpha1.CRDs...))
+	env = coretest.NewEnvironment(scheme.Scheme, coretest.WithCRDs(apis.CRDs...))
 	ctx = coreoptions.ToContext(ctx, coretest.Options())
 	ctx = options.ToContext(ctx, test.Options())
 	ctx, stop = context.WithCancel(ctx)
@@ -67,19 +67,17 @@ var _ = AfterSuite(func() {
 var _ = BeforeEach(func() {
 	ctx = coreoptions.ToContext(ctx, coretest.Options())
 	ctx = options.ToContext(ctx, test.Options())
-	nodeClass = test.EC2NodeClass(v1.EC2NodeClass{
-		Spec: v1.EC2NodeClassSpec{
-			AMISelectorTerms: []v1.AMISelectorTerm{{
-				Alias: "al2@latest",
-			}},
-			SubnetSelectorTerms: []v1.SubnetSelectorTerm{
+	nodeClass = test.EC2NodeClass(v1beta1.EC2NodeClass{
+		Spec: v1beta1.EC2NodeClassSpec{
+			AMIFamily: aws.String(v1beta1.AMIFamilyAL2),
+			SubnetSelectorTerms: []v1beta1.SubnetSelectorTerm{
 				{
 					Tags: map[string]string{
 						"*": "*",
 					},
 				},
 			},
-			SecurityGroupSelectorTerms: []v1.SecurityGroupSelectorTerm{
+			SecurityGroupSelectorTerms: []v1beta1.SecurityGroupSelectorTerm{
 				{
 					Tags: map[string]string{
 						"*": "*",
@@ -98,7 +96,7 @@ var _ = AfterEach(func() {
 var _ = Describe("SubnetProvider", func() {
 	Context("List", func() {
 		It("should discover subnet by ID", func() {
-			nodeClass.Spec.SubnetSelectorTerms = []v1.SubnetSelectorTerm{
+			nodeClass.Spec.SubnetSelectorTerms = []v1beta1.SubnetSelectorTerm{
 				{
 					ID: "subnet-test1",
 				},
@@ -115,7 +113,7 @@ var _ = Describe("SubnetProvider", func() {
 			}, subnets)
 		})
 		It("should discover subnets by IDs", func() {
-			nodeClass.Spec.SubnetSelectorTerms = []v1.SubnetSelectorTerm{
+			nodeClass.Spec.SubnetSelectorTerms = []v1beta1.SubnetSelectorTerm{
 				{
 					ID: "subnet-test1",
 				},
@@ -141,7 +139,7 @@ var _ = Describe("SubnetProvider", func() {
 			}, subnets)
 		})
 		It("should discover subnets by IDs and tags", func() {
-			nodeClass.Spec.SubnetSelectorTerms = []v1.SubnetSelectorTerm{
+			nodeClass.Spec.SubnetSelectorTerms = []v1beta1.SubnetSelectorTerm{
 				{
 					ID:   "subnet-test1",
 					Tags: map[string]string{"foo": "bar"},
@@ -169,7 +167,7 @@ var _ = Describe("SubnetProvider", func() {
 			}, subnets)
 		})
 		It("should discover subnets by a single tag", func() {
-			nodeClass.Spec.SubnetSelectorTerms = []v1.SubnetSelectorTerm{
+			nodeClass.Spec.SubnetSelectorTerms = []v1beta1.SubnetSelectorTerm{
 				{
 					Tags: map[string]string{"Name": "test-subnet-1"},
 				},
@@ -186,7 +184,7 @@ var _ = Describe("SubnetProvider", func() {
 			}, subnets)
 		})
 		It("should discover subnets by multiple tag values", func() {
-			nodeClass.Spec.SubnetSelectorTerms = []v1.SubnetSelectorTerm{
+			nodeClass.Spec.SubnetSelectorTerms = []v1beta1.SubnetSelectorTerm{
 				{
 					Tags: map[string]string{"Name": "test-subnet-1"},
 				},
@@ -212,7 +210,7 @@ var _ = Describe("SubnetProvider", func() {
 			}, subnets)
 		})
 		It("should discover subnets by IDs intersected with tags", func() {
-			nodeClass.Spec.SubnetSelectorTerms = []v1.SubnetSelectorTerm{
+			nodeClass.Spec.SubnetSelectorTerms = []v1beta1.SubnetSelectorTerm{
 				{
 					ID:   "subnet-test2",
 					Tags: map[string]string{"foo": "bar"},
@@ -230,11 +228,58 @@ var _ = Describe("SubnetProvider", func() {
 			}, subnets)
 		})
 	})
+	Context("AssociatePublicIPAddress", func() {
+		It("should be false when no subnets assign a public IPv4 address to EC2 instances on launch", func() {
+			nodeClass.Spec.SubnetSelectorTerms = []v1beta1.SubnetSelectorTerm{
+				{
+					ID:   "subnet-test1",
+					Tags: map[string]string{"foo": "bar"},
+				},
+			}
+			_, err := awsEnv.SubnetProvider.List(ctx, nodeClass)
+			Expect(err).To(BeNil())
+			associatePublicIP := awsEnv.SubnetProvider.AssociatePublicIPAddressValue(nodeClass)
+			Expect(lo.FromPtr(associatePublicIP)).To(BeFalse())
+		})
+		It("should be nil when at least one subnet assigns a public IPv4 address to EC2instances on launch", func() {
+			nodeClass.Spec.SubnetSelectorTerms = []v1beta1.SubnetSelectorTerm{
+				{
+					ID: "subnet-test2",
+				},
+			}
+			nodeClass.Status.Subnets = []v1beta1.Subnet{
+				{
+					ID:   "subnet-test2",
+					Zone: "test-zone-1b",
+				},
+			}
+			_, err := awsEnv.SubnetProvider.List(ctx, nodeClass)
+			Expect(err).To(BeNil())
+			associatePublicIP := awsEnv.SubnetProvider.AssociatePublicIPAddressValue(nodeClass)
+			Expect(associatePublicIP).To(BeNil())
+		})
+		It("should be nil when no subnet data is present in the provider cache", func() {
+			nodeClass.Spec.SubnetSelectorTerms = []v1beta1.SubnetSelectorTerm{
+				{
+					ID: "subnet-test2",
+				},
+			}
+			nodeClass.Status.Subnets = []v1beta1.Subnet{
+				{
+					ID:   "subnet-test2",
+					Zone: "test-zone-1b",
+				},
+			}
+			awsEnv.SubnetCache.Flush() // remove any subnet data that might be in the subnetCache
+			associatePublicIP := awsEnv.SubnetProvider.AssociatePublicIPAddressValue(nodeClass)
+			Expect(associatePublicIP).To(BeNil())
+		})
+	})
 	Context("Provider Cache", func() {
 		It("should resolve subnets from cache that are filtered by id", func() {
 			expectedSubnets := awsEnv.EC2API.DescribeSubnetsOutput.Clone().Subnets
 			for _, subnet := range expectedSubnets {
-				nodeClass.Spec.SubnetSelectorTerms = []v1.SubnetSelectorTerm{
+				nodeClass.Spec.SubnetSelectorTerms = []v1beta1.SubnetSelectorTerm{
 					{
 						ID: *subnet.SubnetId,
 					},
@@ -259,7 +304,7 @@ var _ = Describe("SubnetProvider", func() {
 				return map[string]string{"Name": lo.FromPtr(tag.Value)}
 			})
 			for _, tag := range tagSet {
-				nodeClass.Spec.SubnetSelectorTerms = []v1.SubnetSelectorTerm{
+				nodeClass.Spec.SubnetSelectorTerms = []v1beta1.SubnetSelectorTerm{
 					{
 						Tags: tag,
 					},

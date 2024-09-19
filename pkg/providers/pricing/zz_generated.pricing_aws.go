@@ -16,7 +16,7 @@ limitations under the License.
 
 package pricing
 
-// generated at 2024-07-10T14:30:58Z for us-east-1
+// generated at 2024-04-25T18:18:32Z for us-east-1
 
 var InitialOnDemandPricesAWS = map[string]map[string]float64{
 	// us-east-1
@@ -334,10 +334,6 @@ var InitialOnDemandPricesAWS = map[string]map[string]float64{
 		"r7iz.12xlarge": 4.464000, "r7iz.16xlarge": 5.952000, "r7iz.2xlarge": 0.744000, "r7iz.32xlarge": 11.904000,
 		"r7iz.4xlarge": 1.488000, "r7iz.8xlarge": 2.976000, "r7iz.large": 0.186000, "r7iz.metal-16xl": 6.547200,
 		"r7iz.metal-32xl": 13.094400, "r7iz.xlarge": 0.372000,
-		// r8g family
-		"r8g.12xlarge": 2.827680, "r8g.16xlarge": 3.770240, "r8g.24xlarge": 5.655360, "r8g.2xlarge": 0.471280,
-		"r8g.48xlarge": 11.310720, "r8g.4xlarge": 0.942560, "r8g.8xlarge": 1.885120, "r8g.large": 0.117820,
-		"r8g.medium": 0.058910, "r8g.metal-24xl": 6.220900, "r8g.metal-48xl": 11.310720, "r8g.xlarge": 0.235640,
 		// t1 family
 		"t1.micro": 0.020000,
 		// t2 family
@@ -368,14 +364,6 @@ var InitialOnDemandPricesAWS = map[string]map[string]float64{
 		"u-6tb1.112xlarge": 54.600000, "u-6tb1.56xlarge": 46.403910,
 		// u-9tb1 family
 		"u-9tb1.112xlarge": 81.900000,
-		// u7i-12tb family
-		"u7i-12tb.224xlarge": 152.880000,
-		// u7in-16tb family
-		"u7in-16tb.224xlarge": 203.840000,
-		// u7in-24tb family
-		"u7in-24tb.224xlarge": 305.760000,
-		// u7in-32tb family
-		"u7in-32tb.224xlarge": 407.680000,
 		// vt1 family
 		"vt1.24xlarge": 5.200000, "vt1.3xlarge": 0.650000, "vt1.6xlarge": 1.300000,
 		// x1 family

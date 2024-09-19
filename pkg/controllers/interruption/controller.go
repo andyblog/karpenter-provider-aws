@@ -19,33 +19,32 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
-	"sigs.k8s.io/karpenter/pkg/metrics"
-
 	sqsapi "github.com/aws/aws-sdk-go/service/sqs"
-	"github.com/awslabs/operatorpkg/singleton"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/samber/lo"
 	"go.uber.org/multierr"
-	corev1 "k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/clock"
-	controllerruntime "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-	"sigs.k8s.io/karpenter/pkg/operator/injection"
+	"sigs.k8s.io/karpenter/pkg/metrics"
 
-	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
+	"sigs.k8s.io/karpenter/pkg/apis/v1beta1"
 	"sigs.k8s.io/karpenter/pkg/utils/pretty"
 
 	"github.com/aws/karpenter-provider-aws/pkg/cache"
 	interruptionevents "github.com/aws/karpenter-provider-aws/pkg/controllers/interruption/events"
 	"github.com/aws/karpenter-provider-aws/pkg/controllers/interruption/messages"
+	"github.com/aws/karpenter-provider-aws/pkg/controllers/interruption/messages/statechange"
 	"github.com/aws/karpenter-provider-aws/pkg/providers/sqs"
 	"github.com/aws/karpenter-provider-aws/pkg/utils"
 
 	"sigs.k8s.io/karpenter/pkg/events"
+	corecontroller "sigs.k8s.io/karpenter/pkg/operator/controller"
 )
 
 type Action string
@@ -82,8 +81,7 @@ func NewController(kubeClient client.Client, clk clock.Clock, recorder events.Re
 	}
 }
 
-func (c *Controller) Reconcile(ctx context.Context) (reconcile.Result, error) {
-	ctx = injection.WithControllerName(ctx, "interruption")
+func (c *Controller) Reconcile(ctx context.Context, _ reconcile.Request) (reconcile.Result, error) {
 	ctx = log.IntoContext(ctx, log.FromContext(ctx).WithValues("queue", c.sqsProvider.Name()))
 	if c.cm.HasChanged(c.sqsProvider.Name(), nil) {
 		log.FromContext(ctx).V(1).Info("watching interruption queue")
@@ -93,7 +91,7 @@ func (c *Controller) Reconcile(ctx context.Context) (reconcile.Result, error) {
 		return reconcile.Result{}, fmt.Errorf("getting messages from queue, %w", err)
 	}
 	if len(sqsMessages) == 0 {
-		return reconcile.Result{RequeueAfter: singleton.RequeueImmediately}, nil
+		return reconcile.Result{}, nil
 	}
 	nodeClaimInstanceIDMap, err := c.makeNodeClaimInstanceIDMap(ctx)
 	if err != nil {
@@ -121,14 +119,13 @@ func (c *Controller) Reconcile(ctx context.Context) (reconcile.Result, error) {
 	if err = multierr.Combine(errs...); err != nil {
 		return reconcile.Result{}, err
 	}
-	return reconcile.Result{RequeueAfter: singleton.RequeueImmediately}, nil
+	return reconcile.Result{}, nil
 }
 
 func (c *Controller) Register(_ context.Context, m manager.Manager) error {
-	return controllerruntime.NewControllerManagedBy(m).
+	return corecontroller.NewSingletonManagedBy(m).
 		Named("interruption").
-		WatchesRawSource(singleton.Source()).
-		Complete(singleton.AsReconciler(c))
+		Complete(c)
 }
 
 // parseMessage parses the passed SQS message into an internal Message interface
@@ -145,8 +142,8 @@ func (c *Controller) parseMessage(raw *sqsapi.Message) (messages.Message, error)
 }
 
 // handleMessage takes an action against every node involved in the message that is owned by a NodePool
-func (c *Controller) handleMessage(ctx context.Context, nodeClaimInstanceIDMap map[string]*karpv1.NodeClaim,
-	nodeInstanceIDMap map[string]*corev1.Node, msg messages.Message) (err error) {
+func (c *Controller) handleMessage(ctx context.Context, nodeClaimInstanceIDMap map[string]*v1beta1.NodeClaim,
+	nodeInstanceIDMap map[string]*v1.Node, msg messages.Message) (err error) {
 
 	ctx = log.IntoContext(ctx, log.FromContext(ctx).WithValues("messageKind", msg.Kind()))
 	receivedMessages.WithLabelValues(string(msg.Kind())).Inc()
@@ -181,7 +178,7 @@ func (c *Controller) deleteMessage(ctx context.Context, msg *sqsapi.Message) err
 }
 
 // handleNodeClaim retrieves the action for the message and then performs the appropriate action against the node
-func (c *Controller) handleNodeClaim(ctx context.Context, msg messages.Message, nodeClaim *karpv1.NodeClaim, node *corev1.Node) error {
+func (c *Controller) handleNodeClaim(ctx context.Context, msg messages.Message, nodeClaim *v1beta1.NodeClaim, node *v1.Node) error {
 	action := actionForMessage(msg)
 	ctx = log.IntoContext(ctx, log.FromContext(ctx).WithValues("NodeClaim", klog.KRef("", nodeClaim.Name), "action", string(action)))
 	if node != nil {
@@ -190,23 +187,29 @@ func (c *Controller) handleNodeClaim(ctx context.Context, msg messages.Message, 
 
 	// Record metric and event for this action
 	c.notifyForMessage(msg, nodeClaim, node)
+	actionsPerformed.With(
+		prometheus.Labels{
+			actionTypeLabel:       string(action),
+			metrics.NodePoolLabel: nodeClaim.Labels[v1beta1.NodePoolLabelKey],
+		},
+	).Inc()
 
 	// Mark the offering as unavailable in the ICE cache since we got a spot interruption warning
 	if msg.Kind() == messages.SpotInterruptionKind {
-		zone := nodeClaim.Labels[corev1.LabelTopologyZone]
-		instanceType := nodeClaim.Labels[corev1.LabelInstanceTypeStable]
+		zone := nodeClaim.Labels[v1.LabelTopologyZone]
+		instanceType := nodeClaim.Labels[v1.LabelInstanceTypeStable]
 		if zone != "" && instanceType != "" {
-			c.unavailableOfferingsCache.MarkUnavailable(ctx, string(msg.Kind()), instanceType, zone, karpv1.CapacityTypeSpot)
+			c.unavailableOfferingsCache.MarkUnavailable(ctx, string(msg.Kind()), instanceType, zone, v1beta1.CapacityTypeSpot)
 		}
 	}
 	if action != NoAction {
-		return c.deleteNodeClaim(ctx, msg, nodeClaim, node)
+		return c.deleteNodeClaim(ctx, nodeClaim, node)
 	}
 	return nil
 }
 
 // deleteNodeClaim removes the NodeClaim from the api-server
-func (c *Controller) deleteNodeClaim(ctx context.Context, msg messages.Message, nodeClaim *karpv1.NodeClaim, node *corev1.Node) error {
+func (c *Controller) deleteNodeClaim(ctx context.Context, nodeClaim *v1beta1.NodeClaim, node *v1.Node) error {
 	if !nodeClaim.DeletionTimestamp.IsZero() {
 		return nil
 	}
@@ -215,16 +218,16 @@ func (c *Controller) deleteNodeClaim(ctx context.Context, msg messages.Message, 
 	}
 	log.FromContext(ctx).Info("initiating delete from interruption message")
 	c.recorder.Publish(interruptionevents.TerminatingOnInterruption(node, nodeClaim)...)
-	metrics.NodeClaimsDisruptedTotal.With(prometheus.Labels{
-		metrics.ReasonLabel:       string(msg.Kind()),
-		metrics.NodePoolLabel:     nodeClaim.Labels[karpv1.NodePoolLabelKey],
-		metrics.CapacityTypeLabel: nodeClaim.Labels[karpv1.CapacityTypeLabelKey],
+	metrics.NodeClaimsTerminatedCounter.With(prometheus.Labels{
+		metrics.ReasonLabel:       terminationReasonLabel,
+		metrics.NodePoolLabel:     nodeClaim.Labels[v1beta1.NodePoolLabelKey],
+		metrics.CapacityTypeLabel: nodeClaim.Labels[v1beta1.CapacityTypeLabelKey],
 	}).Inc()
 	return nil
 }
 
 // notifyForMessage publishes the relevant alert based on the message kind
-func (c *Controller) notifyForMessage(msg messages.Message, nodeClaim *karpv1.NodeClaim, n *corev1.Node) {
+func (c *Controller) notifyForMessage(msg messages.Message, nodeClaim *v1beta1.NodeClaim, n *v1.Node) {
 	switch msg.Kind() {
 	case messages.RebalanceRecommendationKind:
 		c.recorder.Publish(interruptionevents.RebalanceRecommendation(n, nodeClaim)...)
@@ -235,11 +238,13 @@ func (c *Controller) notifyForMessage(msg messages.Message, nodeClaim *karpv1.No
 	case messages.SpotInterruptionKind:
 		c.recorder.Publish(interruptionevents.SpotInterrupted(n, nodeClaim)...)
 
-	case messages.InstanceStoppedKind:
-		c.recorder.Publish(interruptionevents.Stopping(n, nodeClaim)...)
-
-	case messages.InstanceTerminatedKind:
-		c.recorder.Publish(interruptionevents.Terminating(n, nodeClaim)...)
+	case messages.StateChangeKind:
+		typed := msg.(statechange.Message)
+		if lo.Contains([]string{"stopping", "stopped"}, typed.Detail.State) {
+			c.recorder.Publish(interruptionevents.Stopping(n, nodeClaim)...)
+		} else {
+			c.recorder.Publish(interruptionevents.Terminating(n, nodeClaim)...)
+		}
 
 	default:
 	}
@@ -247,9 +252,9 @@ func (c *Controller) notifyForMessage(msg messages.Message, nodeClaim *karpv1.No
 
 // makeNodeClaimInstanceIDMap builds a map between the instance id that is stored in the
 // NodeClaim .status.providerID and the NodeClaim
-func (c *Controller) makeNodeClaimInstanceIDMap(ctx context.Context) (map[string]*karpv1.NodeClaim, error) {
-	m := map[string]*karpv1.NodeClaim{}
-	nodeClaimList := &karpv1.NodeClaimList{}
+func (c *Controller) makeNodeClaimInstanceIDMap(ctx context.Context) (map[string]*v1beta1.NodeClaim, error) {
+	m := map[string]*v1beta1.NodeClaim{}
+	nodeClaimList := &v1beta1.NodeClaimList{}
 	if err := c.kubeClient.List(ctx, nodeClaimList); err != nil {
 		return nil, err
 	}
@@ -268,9 +273,9 @@ func (c *Controller) makeNodeClaimInstanceIDMap(ctx context.Context) (map[string
 
 // makeNodeInstanceIDMap builds a map between the instance id that is stored in the
 // node .spec.providerID and the node
-func (c *Controller) makeNodeInstanceIDMap(ctx context.Context) (map[string]*corev1.Node, error) {
-	m := map[string]*corev1.Node{}
-	nodeList := &corev1.NodeList{}
+func (c *Controller) makeNodeInstanceIDMap(ctx context.Context) (map[string]*v1.Node, error) {
+	m := map[string]*v1.Node{}
+	nodeList := &v1.NodeList{}
 	if err := c.kubeClient.List(ctx, nodeList); err != nil {
 		return nil, fmt.Errorf("listing nodes, %w", err)
 	}
@@ -289,7 +294,7 @@ func (c *Controller) makeNodeInstanceIDMap(ctx context.Context) (map[string]*cor
 
 func actionForMessage(msg messages.Message) Action {
 	switch msg.Kind() {
-	case messages.ScheduledChangeKind, messages.SpotInterruptionKind, messages.InstanceStoppedKind, messages.InstanceTerminatedKind:
+	case messages.ScheduledChangeKind, messages.SpotInterruptionKind, messages.StateChangeKind:
 		return CordonAndDrain
 	default:
 		return NoAction

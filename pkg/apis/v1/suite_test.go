@@ -18,11 +18,10 @@ import (
 	"context"
 	"testing"
 
-	"sigs.k8s.io/karpenter/pkg/test/v1alpha1"
-
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	. "knative.dev/pkg/logging/testing"
+	"sigs.k8s.io/karpenter/pkg/operator/scheme"
 
 	. "sigs.k8s.io/karpenter/pkg/test/expectations"
 
@@ -43,7 +42,7 @@ func TestAPIs(t *testing.T) {
 }
 
 var _ = BeforeSuite(func() {
-	env = coretest.NewEnvironment(coretest.WithCRDs(apis.CRDs...), coretest.WithCRDs(v1alpha1.CRDs...))
+	env = coretest.NewEnvironment(scheme.Scheme, coretest.WithCRDs(apis.CRDs...))
 	awsEnv = test.NewEnvironment(ctx, env)
 })
 

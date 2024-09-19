@@ -23,17 +23,15 @@ import (
 
 const (
 	NodeSubsystem      = "nodes"
-	NodeClaimSubsystem = "nodeclaims"
-	NodePoolSubsystem  = "nodepools"
-	PodSubsystem       = "pods"
+	nodeClaimSubsystem = "nodeclaims"
 )
 
 var (
-	NodeClaimsCreatedTotal = prometheus.NewCounterVec(
+	NodeClaimsCreatedCounter = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: Namespace,
-			Subsystem: NodeClaimSubsystem,
-			Name:      "created_total",
+			Subsystem: nodeClaimSubsystem,
+			Name:      "created",
 			Help:      "Number of nodeclaims created in total by Karpenter. Labeled by reason the nodeclaim was created and the owning nodepool.",
 		},
 		[]string{
@@ -42,24 +40,12 @@ var (
 			CapacityTypeLabel,
 		},
 	)
-	NodeClaimsTerminatedTotal = prometheus.NewCounterVec(
+	NodeClaimsTerminatedCounter = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: Namespace,
-			Subsystem: NodeClaimSubsystem,
-			Name:      "terminated_total",
-			Help:      "Number of nodeclaims terminated in total by Karpenter. Labeled by the owning nodepool.",
-		},
-		[]string{
-			NodePoolLabel,
-			CapacityTypeLabel,
-		},
-	)
-	NodeClaimsDisruptedTotal = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: Namespace,
-			Subsystem: NodeClaimSubsystem,
-			Name:      "disrupted_total",
-			Help:      "Number of nodeclaims disrupted in total by Karpenter. Labeled by reason the nodeclaim was disrupted and the owning nodepool.",
+			Subsystem: nodeClaimSubsystem,
+			Name:      "terminated",
+			Help:      "Number of nodeclaims terminated in total by Karpenter. Labeled by reason the nodeclaim was terminated and the owning nodepool.",
 		},
 		[]string{
 			ReasonLabel,
@@ -67,22 +53,79 @@ var (
 			CapacityTypeLabel,
 		},
 	)
-	NodesCreatedTotal = prometheus.NewCounterVec(
+	NodeClaimsLaunchedCounter = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: Namespace,
+			Subsystem: nodeClaimSubsystem,
+			Name:      "launched",
+			Help:      "Number of nodeclaims launched in total by Karpenter. Labeled by the owning nodepool.",
+		},
+		[]string{
+			NodePoolLabel,
+		},
+	)
+	NodeClaimsRegisteredCounter = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: Namespace,
+			Subsystem: nodeClaimSubsystem,
+			Name:      "registered",
+			Help:      "Number of nodeclaims registered in total by Karpenter. Labeled by the owning nodepool.",
+		},
+		[]string{
+			NodePoolLabel,
+		},
+	)
+	NodeClaimsInitializedCounter = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: Namespace,
+			Subsystem: nodeClaimSubsystem,
+			Name:      "initialized",
+			Help:      "Number of nodeclaims initialized in total by Karpenter. Labeled by the owning nodepool.",
+		},
+		[]string{
+			NodePoolLabel,
+		},
+	)
+	NodeClaimsDisruptedCounter = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: Namespace,
+			Subsystem: nodeClaimSubsystem,
+			Name:      "disrupted",
+			Help:      "Number of nodeclaims disrupted in total by Karpenter. Labeled by disruption type of the nodeclaim and the owning nodepool.",
+		},
+		[]string{
+			TypeLabel,
+			NodePoolLabel,
+		},
+	)
+	NodeClaimsDriftedCounter = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: Namespace,
+			Subsystem: nodeClaimSubsystem,
+			Name:      "drifted",
+			Help:      "Number of nodeclaims drifted reasons in total by Karpenter. Labeled by drift type of the nodeclaim and the owning nodepool.",
+		},
+		[]string{
+			TypeLabel,
+			NodePoolLabel,
+		},
+	)
+	NodesCreatedCounter = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: Namespace,
 			Subsystem: NodeSubsystem,
-			Name:      "created_total",
+			Name:      "created",
 			Help:      "Number of nodes created in total by Karpenter. Labeled by owning nodepool.",
 		},
 		[]string{
 			NodePoolLabel,
 		},
 	)
-	NodesTerminatedTotal = prometheus.NewCounterVec(
+	NodesTerminatedCounter = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: Namespace,
 			Subsystem: NodeSubsystem,
-			Name:      "terminated_total",
+			Name:      "terminated",
 			Help:      "Number of nodes terminated in total by Karpenter. Labeled by owning nodepool.",
 		},
 		[]string{
@@ -92,6 +135,7 @@ var (
 )
 
 func init() {
-	crmetrics.Registry.MustRegister(NodeClaimsCreatedTotal, NodeClaimsTerminatedTotal, NodeClaimsDisruptedTotal,
-		NodesCreatedTotal, NodesTerminatedTotal, workqueueDepth, workqueueAdds, workqueueLatency, workDuration, workqueueUnfinished, workqueueLongestRunningProcessor, workqueueRetries)
+	crmetrics.Registry.MustRegister(NodeClaimsCreatedCounter, NodeClaimsTerminatedCounter, NodeClaimsLaunchedCounter,
+		NodeClaimsRegisteredCounter, NodeClaimsInitializedCounter, NodeClaimsDisruptedCounter, NodeClaimsDriftedCounter,
+		NodesCreatedCounter, NodesTerminatedCounter)
 }

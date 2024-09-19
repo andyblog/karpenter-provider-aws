@@ -26,7 +26,7 @@ import (
 	"github.com/samber/lo"
 	"go.uber.org/multierr"
 	appsv1 "k8s.io/api/apps/v1"
-	corev1 "k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -38,15 +38,18 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	v1 "sigs.k8s.io/karpenter/pkg/apis/v1"
+	"sigs.k8s.io/karpenter/pkg/apis/v1beta1"
+	"sigs.k8s.io/karpenter/pkg/cloudprovider"
 	"sigs.k8s.io/karpenter/pkg/scheduling"
 	podutils "sigs.k8s.io/karpenter/pkg/utils/pod"
 )
 
 // Cluster maintains cluster state that is often needed but expensive to compute.
 type Cluster struct {
-	kubeClient                client.Client
-	clock                     clock.Clock
+	kubeClient    client.Client
+	cloudProvider cloudprovider.CloudProvider
+	clock         clock.Clock
+
 	mu                        sync.RWMutex
 	nodes                     map[string]*StateNode           // provider id -> cached node
 	bindings                  map[types.NamespacedName]string // pod namespaced named -> node name
@@ -61,13 +64,14 @@ type Cluster struct {
 	// the state, interested disruption methods can check to see if this has changed to
 	// optimize and not try to disrupt if nothing about the cluster has changed.
 	clusterState     time.Time
-	antiAffinityPods sync.Map // pod namespaced name -> *corev1.Pod of pods that have required anti affinities
+	antiAffinityPods sync.Map // pod namespaced name -> *v1.Pod of pods that have required anti affinities
 }
 
-func NewCluster(clk clock.Clock, client client.Client) *Cluster {
+func NewCluster(clk clock.Clock, client client.Client, cp cloudprovider.CloudProvider) *Cluster {
 	return &Cluster{
 		clock:                     clk,
 		kubeClient:                client,
+		cloudProvider:             cp,
 		nodes:                     map[string]*StateNode{},
 		bindings:                  map[types.NamespacedName]string{},
 		daemonSetPods:             sync.Map{},
@@ -87,12 +91,12 @@ func (c *Cluster) Synced(ctx context.Context) (synced bool) {
 	defer func() {
 		ClusterStateSynced.Set(lo.Ternary[float64](synced, 1, 0))
 	}()
-	nodeClaimList := &v1.NodeClaimList{}
+	nodeClaimList := &v1beta1.NodeClaimList{}
 	if err := c.kubeClient.List(ctx, nodeClaimList); err != nil {
 		log.FromContext(ctx).Error(err, "failed checking cluster state sync")
 		return false
 	}
-	nodeList := &corev1.NodeList{}
+	nodeList := &v1.NodeList{}
 	if err := c.kubeClient.List(ctx, nodeList); err != nil {
 		log.FromContext(ctx).Error(err, "failed checking cluster state sync")
 		return false
@@ -129,9 +133,9 @@ func (c *Cluster) Synced(ctx context.Context) (synced bool) {
 // ForPodsWithAntiAffinity calls the supplied function once for each pod with required anti affinity terms that is
 // currently bound to a node. The pod returned may not be up-to-date with respect to status, however since the
 // anti-affinity terms can't be modified, they will be correct.
-func (c *Cluster) ForPodsWithAntiAffinity(fn func(p *corev1.Pod, n *corev1.Node) bool) {
+func (c *Cluster) ForPodsWithAntiAffinity(fn func(p *v1.Pod, n *v1.Node) bool) {
 	c.antiAffinityPods.Range(func(key, value interface{}) bool {
-		pod := value.(*corev1.Pod)
+		pod := value.(*v1.Pod)
 		c.mu.RLock()
 		defer c.mu.RUnlock()
 		nodeName, ok := c.bindings[client.ObjectKeyFromObject(pod)]
@@ -193,7 +197,7 @@ func (c *Cluster) NominateNodeForPod(ctx context.Context, providerID string) {
 	}
 }
 
-// TODO remove this when v1alpha5 APIs are deprecated. With v1 APIs Karpenter relies on the existence
+// TODO remove this when v1alpha5 APIs are deprecated. With v1beta1 APIs Karpenter relies on the existence
 // of the karpenter.sh/disruption taint to know when a node is marked for deletion.
 // UnmarkForDeletion removes the marking on the node as a node the controller intends to delete
 func (c *Cluster) UnmarkForDeletion(providerIDs ...string) {
@@ -207,7 +211,7 @@ func (c *Cluster) UnmarkForDeletion(providerIDs ...string) {
 	}
 }
 
-// TODO remove this when v1alpha5 APIs are deprecated. With v1 APIs Karpenter relies on the existence
+// TODO remove this when v1alpha5 APIs are deprecated. With v1beta1 APIs Karpenter relies on the existence
 // of the karpenter.sh/disruption taint to know when a node is marked for deletion.
 // MarkForDeletion marks the node as pending deletion in the internal cluster state
 func (c *Cluster) MarkForDeletion(providerIDs ...string) {
@@ -221,7 +225,7 @@ func (c *Cluster) MarkForDeletion(providerIDs ...string) {
 	}
 }
 
-func (c *Cluster) UpdateNodeClaim(nodeClaim *v1.NodeClaim) {
+func (c *Cluster) UpdateNodeClaim(nodeClaim *v1beta1.NodeClaim) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -246,12 +250,12 @@ func (c *Cluster) DeleteNodeClaim(name string) {
 	ClusterStateNodesCount.Set(float64(len(c.nodes)))
 }
 
-func (c *Cluster) UpdateNode(ctx context.Context, node *corev1.Node) error {
+func (c *Cluster) UpdateNode(ctx context.Context, node *v1.Node) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	managed := node.Labels[v1.NodePoolLabelKey] != ""
-	initialized := node.Labels[v1.NodeInitializedLabelKey] != ""
+	managed := node.Labels[v1beta1.NodePoolLabelKey] != ""
+	initialized := node.Labels[v1beta1.NodeInitializedLabelKey] != ""
 	if node.Spec.ProviderID == "" {
 		// If we know that we own this node, we shouldn't allow the providerID to be empty
 		if managed {
@@ -261,7 +265,7 @@ func (c *Cluster) UpdateNode(ctx context.Context, node *corev1.Node) error {
 	}
 	// If we have a managed node with no instance type label that hasn't been initialized,
 	// we need to wait until the instance type label gets propagated on it
-	if managed && node.Labels[corev1.LabelInstanceTypeStable] == "" && !initialized {
+	if managed && node.Labels[v1.LabelInstanceTypeStable] == "" && !initialized {
 		return nil
 	}
 	n, err := c.newStateFromNode(ctx, node, c.nodes[node.Spec.ProviderID])
@@ -281,7 +285,7 @@ func (c *Cluster) DeleteNode(name string) {
 	ClusterStateNodesCount.Set(float64(len(c.nodes)))
 }
 
-func (c *Cluster) UpdatePod(ctx context.Context, pod *corev1.Pod) error {
+func (c *Cluster) UpdatePod(ctx context.Context, pod *v1.Pod) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -347,16 +351,16 @@ func (c *Cluster) Reset() {
 	c.daemonSetPods = sync.Map{}
 }
 
-func (c *Cluster) GetDaemonSetPod(daemonset *appsv1.DaemonSet) *corev1.Pod {
+func (c *Cluster) GetDaemonSetPod(daemonset *appsv1.DaemonSet) *v1.Pod {
 	if pod, ok := c.daemonSetPods.Load(client.ObjectKeyFromObject(daemonset)); ok {
-		return pod.(*corev1.Pod).DeepCopy()
+		return pod.(*v1.Pod).DeepCopy()
 	}
 
 	return nil
 }
 
 func (c *Cluster) UpdateDaemonSet(ctx context.Context, daemonset *appsv1.DaemonSet) error {
-	pods := &corev1.PodList{}
+	pods := &v1.PodList{}
 	err := c.kubeClient.List(ctx, pods, client.InNamespace(daemonset.Namespace))
 	if err != nil {
 		return err
@@ -385,7 +389,7 @@ func (c *Cluster) DeleteDaemonSet(key types.NamespacedName) {
 // and explicitly modifying the cluster state. If you do not hold the cluster state lock before calling any of these helpers
 // you will hit race conditions and data corruption
 
-func (c *Cluster) newStateFromNodeClaim(nodeClaim *v1.NodeClaim, oldNode *StateNode) *StateNode {
+func (c *Cluster) newStateFromNodeClaim(nodeClaim *v1beta1.NodeClaim, oldNode *StateNode) *StateNode {
 	if oldNode == nil {
 		oldNode = NewNode()
 	}
@@ -426,17 +430,17 @@ func (c *Cluster) cleanupNodeClaim(name string) {
 	delete(c.nodeClaimNameToProviderID, name)
 }
 
-func (c *Cluster) newStateFromNode(ctx context.Context, node *corev1.Node, oldNode *StateNode) (*StateNode, error) {
+func (c *Cluster) newStateFromNode(ctx context.Context, node *v1.Node, oldNode *StateNode) (*StateNode, error) {
 	if oldNode == nil {
 		oldNode = NewNode()
 	}
 	n := &StateNode{
 		Node:              node,
 		NodeClaim:         oldNode.NodeClaim,
-		daemonSetRequests: map[types.NamespacedName]corev1.ResourceList{},
-		daemonSetLimits:   map[types.NamespacedName]corev1.ResourceList{},
-		podRequests:       map[types.NamespacedName]corev1.ResourceList{},
-		podLimits:         map[types.NamespacedName]corev1.ResourceList{},
+		daemonSetRequests: map[types.NamespacedName]v1.ResourceList{},
+		daemonSetLimits:   map[types.NamespacedName]v1.ResourceList{},
+		podRequests:       map[types.NamespacedName]v1.ResourceList{},
+		podLimits:         map[types.NamespacedName]v1.ResourceList{},
 		hostPortUsage:     scheduling.NewHostPortUsage(),
 		volumeUsage:       scheduling.NewVolumeUsage(),
 		markedForDeletion: oldNode.markedForDeletion,
@@ -485,7 +489,7 @@ func (c *Cluster) populateVolumeLimits(ctx context.Context, n *StateNode) error 
 }
 
 func (c *Cluster) populateResourceRequests(ctx context.Context, n *StateNode) error {
-	var pods corev1.PodList
+	var pods v1.PodList
 	if err := c.kubeClient.List(ctx, &pods, client.MatchingFields{"spec.nodeName": n.Node.Name}); err != nil {
 		return fmt.Errorf("listing pods, %w", err)
 	}
@@ -505,7 +509,7 @@ func (c *Cluster) populateResourceRequests(ctx context.Context, n *StateNode) er
 
 // updateNodeUsageFromPod is called every time a reconcile event occurs for the pod. If the pods binding has changed
 // (unbound to bound), we need to update the resource requests on the node.
-func (c *Cluster) updateNodeUsageFromPod(ctx context.Context, pod *corev1.Pod) error {
+func (c *Cluster) updateNodeUsageFromPod(ctx context.Context, pod *v1.Pod) error {
 	// nothing to do if the pod isn't bound, checking early allows avoiding unnecessary locking
 	if pod.Spec.NodeName == "" {
 		return nil
@@ -540,7 +544,7 @@ func (c *Cluster) updateNodeUsageFromPodCompletion(podKey types.NamespacedName) 
 	n.cleanupForPod(podKey)
 }
 
-func (c *Cluster) cleanupOldBindings(pod *corev1.Pod) {
+func (c *Cluster) cleanupOldBindings(pod *v1.Pod) {
 	if oldNodeName, bindingKnown := c.bindings[client.ObjectKeyFromObject(pod)]; bindingKnown {
 		if oldNodeName == pod.Spec.NodeName {
 			// we are already tracking the pod binding, so nothing to update
@@ -558,7 +562,7 @@ func (c *Cluster) cleanupOldBindings(pod *corev1.Pod) {
 	c.MarkUnconsolidated()
 }
 
-func (c *Cluster) updatePodAntiAffinities(pod *corev1.Pod) {
+func (c *Cluster) updatePodAntiAffinities(pod *v1.Pod) {
 	// We intentionally don't track inverse anti-affinity preferences. We're not
 	// required to enforce them so it just adds complexity for very little
 	// value. The problem with them comes from the relaxation process, the pod

@@ -83,8 +83,7 @@ Resources:
               ],
               "Condition": {
                 "StringEquals": {
-                  "aws:RequestTag/kubernetes.io/cluster/${ClusterName}": "owned",
-                  "aws:RequestTag/eks:eks-cluster-name": "${ClusterName}"
+                  "aws:RequestTag/kubernetes.io/cluster/${ClusterName}": "owned"
                 },
                 "StringLike": {
                   "aws:RequestTag/karpenter.sh/nodepool": "*"
@@ -106,7 +105,6 @@ Resources:
               "Condition": {
                 "StringEquals": {
                   "aws:RequestTag/kubernetes.io/cluster/${ClusterName}": "owned",
-                  "aws:RequestTag/eks:eks-cluster-name": "${ClusterName}",
                   "ec2:CreateAction": [
                     "RunInstances",
                     "CreateFleet",
@@ -130,12 +128,8 @@ Resources:
                 "StringLike": {
                   "aws:ResourceTag/karpenter.sh/nodepool": "*"
                 },
-                "StringEqualsIfExists": {
-                  "aws:RequestTag/eks:eks-cluster-name": "${ClusterName}"
-                },
                 "ForAllValues:StringEquals": {
                   "aws:TagKeys": [
-                    "eks:eks-cluster-name",
                     "karpenter.sh/nodeclaim",
                     "Name"
                   ]
@@ -219,14 +213,13 @@ Resources:
             {
               "Sid": "AllowScopedInstanceProfileCreationActions",
               "Effect": "Allow",
-              "Resource": "arn:${AWS::Partition}:iam::${AWS::AccountId}:instance-profile/*",
+              "Resource": "*",
               "Action": [
                 "iam:CreateInstanceProfile"
               ],
               "Condition": {
                 "StringEquals": {
                   "aws:RequestTag/kubernetes.io/cluster/${ClusterName}": "owned",
-                  "aws:RequestTag/eks:eks-cluster-name": "${ClusterName}",
                   "aws:RequestTag/topology.kubernetes.io/region": "${AWS::Region}"
                 },
                 "StringLike": {
@@ -237,7 +230,7 @@ Resources:
             {
               "Sid": "AllowScopedInstanceProfileTagActions",
               "Effect": "Allow",
-              "Resource": "arn:${AWS::Partition}:iam::${AWS::AccountId}:instance-profile/*",
+              "Resource": "*",
               "Action": [
                 "iam:TagInstanceProfile"
               ],
@@ -246,7 +239,6 @@ Resources:
                   "aws:ResourceTag/kubernetes.io/cluster/${ClusterName}": "owned",
                   "aws:ResourceTag/topology.kubernetes.io/region": "${AWS::Region}",
                   "aws:RequestTag/kubernetes.io/cluster/${ClusterName}": "owned",
-                  "aws:RequestTag/eks:eks-cluster-name": "${ClusterName}",
                   "aws:RequestTag/topology.kubernetes.io/region": "${AWS::Region}"
                 },
                 "StringLike": {
@@ -258,7 +250,7 @@ Resources:
             {
               "Sid": "AllowScopedInstanceProfileActions",
               "Effect": "Allow",
-              "Resource": "arn:${AWS::Partition}:iam::${AWS::AccountId}:instance-profile/*",
+              "Resource": "*",
               "Action": [
                 "iam:AddRoleToInstanceProfile",
                 "iam:RemoveRoleFromInstanceProfile",
@@ -277,7 +269,7 @@ Resources:
             {
               "Sid": "AllowInstanceProfileReadActions",
               "Effect": "Allow",
-              "Resource": "arn:${AWS::Partition}:iam::${AWS::AccountId}:instance-profile/*",
+              "Resource": "*",
               "Action": "iam:GetInstanceProfile"
             },
             {
@@ -309,14 +301,6 @@ Resources:
                 - sqs.amazonaws.com
             Action: sqs:SendMessage
             Resource: !GetAtt KarpenterInterruptionQueue.Arn
-          - Sid: DenyHTTP
-            Effect: Deny
-            Action: sqs:*
-            Resource: !GetAtt KarpenterInterruptionQueue.Arn
-            Condition:
-              Bool:
-                aws:SecureTransport: false
-            Principal: "*"
   ScheduledChangeRule:
     Type: 'AWS::Events::Rule'
     Properties:

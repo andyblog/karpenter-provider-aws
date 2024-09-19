@@ -17,25 +17,26 @@ package instancetype
 import (
 	"context"
 	"fmt"
-	"github.com/mitchellh/hashstructure/v2"
-	"github.com/patrickmn/go-cache"
-	"github.com/prometheus/client_golang/prometheus"
 	"net/http"
-	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sync"
 	"sync/atomic"
 
-	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
+	"github.com/mitchellh/hashstructure/v2"
+	"github.com/patrickmn/go-cache"
+	"github.com/prometheus/client_golang/prometheus"
+	"sigs.k8s.io/controller-runtime/pkg/log"
+
+	corev1beta1 "sigs.k8s.io/karpenter/pkg/apis/v1beta1"
 	"sigs.k8s.io/karpenter/pkg/scheduling"
 
-	v1 "github.com/aws/karpenter-provider-aws/pkg/apis/v1"
+	"github.com/aws/karpenter-provider-aws/pkg/apis/v1beta1"
 	awscache "github.com/aws/karpenter-provider-aws/pkg/cache"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/ec2"
 	"github.com/aws/aws-sdk-go/service/ec2/ec2iface"
 	"github.com/samber/lo"
-	corev1 "k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
 
 	"github.com/aws/karpenter-provider-aws/pkg/providers/amifamily"
@@ -48,7 +49,7 @@ import (
 
 type Provider interface {
 	LivenessProbe(*http.Request) error
-	List(context.Context, *v1.KubeletConfiguration, *v1.EC2NodeClass) ([]*cloudprovider.InstanceType, error)
+	List(context.Context, *corev1beta1.KubeletConfiguration, *v1beta1.EC2NodeClass) ([]*cloudprovider.InstanceType, error)
 	UpdateInstanceTypes(ctx context.Context) error
 	UpdateInstanceTypeOfferings(ctx context.Context) error
 }
@@ -96,14 +97,14 @@ func NewDefaultProvider(region string, instanceTypesCache *cache.Cache, ec2api e
 	}
 }
 
-func (p *DefaultProvider) List(ctx context.Context, kc *v1.KubeletConfiguration, nodeClass *v1.EC2NodeClass) ([]*cloudprovider.InstanceType, error) {
+func (p *DefaultProvider) List(ctx context.Context, kc *corev1beta1.KubeletConfiguration, nodeClass *v1beta1.EC2NodeClass) ([]*cloudprovider.InstanceType, error) {
 	p.muInstanceTypeInfo.RLock()
 	p.muInstanceTypeOfferings.RLock()
 	defer p.muInstanceTypeInfo.RUnlock()
 	defer p.muInstanceTypeOfferings.RUnlock()
 
 	if kc == nil {
-		kc = &v1.KubeletConfiguration{}
+		kc = &corev1beta1.KubeletConfiguration{}
 	}
 	if len(p.instanceTypesInfo) == 0 {
 		return nil, fmt.Errorf("no instance types found")
@@ -115,7 +116,7 @@ func (p *DefaultProvider) List(ctx context.Context, kc *v1.KubeletConfiguration,
 		return nil, fmt.Errorf("no subnets found")
 	}
 
-	subnetZones := sets.New(lo.Map(nodeClass.Status.Subnets, func(s v1.Subnet, _ int) string {
+	subnetZones := sets.New(lo.Map(nodeClass.Status.Subnets, func(s v1beta1.Subnet, _ int) string {
 		return aws.StringValue(&s.Zone)
 	})...)
 
@@ -130,8 +131,8 @@ func (p *DefaultProvider) List(ctx context.Context, kc *v1.KubeletConfiguration,
 		subnetZonesHash,
 		kcHash,
 		blockDeviceMappingsHash,
-		lo.FromPtr((*string)(nodeClass.Spec.InstanceStorePolicy)),
-		nodeClass.AMIFamily(),
+		aws.StringValue((*string)(nodeClass.Spec.InstanceStorePolicy)),
+		aws.StringValue(nodeClass.Spec.AMIFamily),
 	)
 	if item, ok := p.instanceTypesCache.Get(key); ok {
 		// Ensure what's returned from this function is a shallow-copy of the slice (not a deep-copy of the data itself)
@@ -150,7 +151,7 @@ func (p *DefaultProvider) List(ctx context.Context, kc *v1.KubeletConfiguration,
 	if p.cm.HasChanged("zones", allZones) {
 		log.FromContext(ctx).WithValues("zones", allZones.UnsortedList()).V(1).Info("discovered zones")
 	}
-	amiFamily := amifamily.GetAMIFamily(nodeClass.AMIFamily(), &amifamily.Options{})
+	amiFamily := amifamily.GetAMIFamily(nodeClass.Spec.AMIFamily, &amifamily.Options{})
 	result := lo.Map(p.instanceTypesInfo, func(i *ec2.InstanceTypeInfo, _ int) *cloudprovider.InstanceType {
 		instanceTypeVCPU.With(prometheus.Labels{
 			instanceTypeLabel: *i.InstanceType,
@@ -169,20 +170,6 @@ func (p *DefaultProvider) List(ctx context.Context, kc *v1.KubeletConfiguration,
 			amiFamily, p.createOfferings(ctx, i, allZones, p.instanceTypeOfferings[aws.StringValue(i.InstanceType)], nodeClass.Status.Subnets),
 		)
 	})
-
-	//log.FromContext(ctx).WithValues(
-	//	"debug5", len(result)).V(1).Info("discovered result3")
-	//for _, v := range result {
-	//	//time.Sleep(10 * time.Millisecond)
-	//	if v.Name == "c5.2xlarge" {
-	//		//log.FromContext(ctx).WithValues("debug6", "start").V(1).Info("discovered result2")
-	//		data, _ := json.Marshal(v)
-	//		//time.Sleep(10 * time.Millisecond)
-	//		log.FromContext(ctx).WithValues("debug8", string(data)).V(1).Info("discovered result4")
-	//	}
-	//
-	//}
-
 	p.instanceTypesCache.SetDefault(key, result)
 	return result, nil
 }
@@ -274,7 +261,7 @@ func (p *DefaultProvider) UpdateInstanceTypeOfferings(ctx context.Context) error
 // offering, you can do the following thanks to this invariant:
 //
 //	offering.Requirements.Get(v1.TopologyLabelZone).Any()
-func (p *DefaultProvider) createOfferings(ctx context.Context, instanceType *ec2.InstanceTypeInfo, zones, instanceTypeZones sets.Set[string], subnets []v1.Subnet) []cloudprovider.Offering {
+func (p *DefaultProvider) createOfferings(ctx context.Context, instanceType *ec2.InstanceTypeInfo, zones, instanceTypeZones sets.Set[string], subnets []v1beta1.Subnet) []cloudprovider.Offering {
 	var offerings []cloudprovider.Offering
 	for zone := range zones {
 		// while usage classes should be a distinct set, there's no guarantee of that
@@ -296,20 +283,20 @@ func (p *DefaultProvider) createOfferings(ctx context.Context, instanceType *ec2
 				continue
 			}
 
-			subnet, hasSubnet := lo.Find(subnets, func(s v1.Subnet) bool {
+			subnet, hasSubnet := lo.Find(subnets, func(s v1beta1.Subnet) bool {
 				return s.Zone == zone
 			})
 			available := !isUnavailable && ok && instanceTypeZones.Has(zone) && hasSubnet
 			offering := cloudprovider.Offering{
 				Requirements: scheduling.NewRequirements(
-					scheduling.NewRequirement(karpv1.CapacityTypeLabelKey, corev1.NodeSelectorOpIn, capacityType),
-					scheduling.NewRequirement(corev1.LabelTopologyZone, corev1.NodeSelectorOpIn, zone),
+					scheduling.NewRequirement(corev1beta1.CapacityTypeLabelKey, v1.NodeSelectorOpIn, capacityType),
+					scheduling.NewRequirement(v1.LabelTopologyZone, v1.NodeSelectorOpIn, zone),
 				),
 				Price:     price,
 				Available: available,
 			}
 			if subnet.ZoneID != "" {
-				offering.Requirements.Add(scheduling.NewRequirement(v1.LabelTopologyZoneID, corev1.NodeSelectorOpIn, subnet.ZoneID))
+				offering.Requirements.Add(scheduling.NewRequirement(v1beta1.LabelTopologyZoneID, v1.NodeSelectorOpIn, subnet.ZoneID))
 			}
 			offerings = append(offerings, offering)
 			instanceTypeOfferingAvailable.With(prometheus.Labels{

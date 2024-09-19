@@ -21,7 +21,7 @@ import (
 	"time"
 
 	"github.com/samber/lo"
-	corev1 "k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	controllerruntime "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -30,7 +30,8 @@ import (
 
 	"sigs.k8s.io/karpenter/pkg/operator/injection"
 
-	v1 "sigs.k8s.io/karpenter/pkg/apis/v1"
+	"sigs.k8s.io/karpenter/pkg/apis/v1beta1"
+	"sigs.k8s.io/karpenter/pkg/events"
 	"sigs.k8s.io/karpenter/pkg/utils/pod"
 )
 
@@ -38,18 +39,20 @@ import (
 type PodController struct {
 	kubeClient  client.Client
 	provisioner *Provisioner
+	recorder    events.Recorder
 }
 
 // NewPodController constructs a controller instance
-func NewPodController(kubeClient client.Client, provisioner *Provisioner) *PodController {
+func NewPodController(kubeClient client.Client, provisioner *Provisioner, recorder events.Recorder) *PodController {
 	return &PodController{
 		kubeClient:  kubeClient,
 		provisioner: provisioner,
+		recorder:    recorder,
 	}
 }
 
 // Reconcile the resource
-func (c *PodController) Reconcile(ctx context.Context, p *corev1.Pod) (reconcile.Result, error) {
+func (c *PodController) Reconcile(ctx context.Context, p *v1.Pod) (reconcile.Result, error) {
 	ctx = injection.WithControllerName(ctx, "provisioner.trigger.pod") //nolint:ineffassign,staticcheck
 
 	if !pod.IsProvisionable(p) {
@@ -66,7 +69,7 @@ func (c *PodController) Reconcile(ctx context.Context, p *corev1.Pod) (reconcile
 func (c *PodController) Register(_ context.Context, m manager.Manager) error {
 	return controllerruntime.NewControllerManagedBy(m).
 		Named("provisioner.trigger.pod").
-		For(&corev1.Pod{}).
+		For(&v1.Pod{}).
 		WithOptions(controller.Options{MaxConcurrentReconciles: 10}).
 		Complete(reconcile.AsReconciler(m.GetClient(), c))
 }
@@ -75,27 +78,27 @@ func (c *PodController) Register(_ context.Context, m manager.Manager) error {
 type NodeController struct {
 	kubeClient  client.Client
 	provisioner *Provisioner
+	recorder    events.Recorder
 }
 
 // NewNodeController constructs a controller instance
-func NewNodeController(kubeClient client.Client, provisioner *Provisioner) *NodeController {
+func NewNodeController(kubeClient client.Client, provisioner *Provisioner, recorder events.Recorder) *NodeController {
 	return &NodeController{
 		kubeClient:  kubeClient,
 		provisioner: provisioner,
+		recorder:    recorder,
 	}
 }
 
 // Reconcile the resource
-func (c *NodeController) Reconcile(ctx context.Context, n *corev1.Node) (reconcile.Result, error) {
+func (c *NodeController) Reconcile(ctx context.Context, n *v1.Node) (reconcile.Result, error) {
 	//nolint:ineffassign
 	ctx = injection.WithControllerName(ctx, "provisioner.trigger.node") //nolint:ineffassign,staticcheck
 
-	// If the disruption taint doesn't exist and the deletion timestamp isn't set, it's not being disrupted.
+	// If the disruption taint doesn't exist or the deletion timestamp isn't set, it's not being disrupted.
 	// We don't check the deletion timestamp here, as we expect the termination controller to eventually set
 	// the taint when it picks up the node from being deleted.
-	if !lo.ContainsBy(n.Spec.Taints, func(taint corev1.Taint) bool {
-		return v1.IsDisruptingTaint(taint)
-	}) {
+	if !lo.Contains(n.Spec.Taints, v1beta1.DisruptionNoScheduleTaint) {
 		return reconcile.Result{}, nil
 	}
 	c.provisioner.Trigger()
@@ -109,7 +112,7 @@ func (c *NodeController) Reconcile(ctx context.Context, n *corev1.Node) (reconci
 func (c *NodeController) Register(_ context.Context, m manager.Manager) error {
 	return controllerruntime.NewControllerManagedBy(m).
 		Named("provisioner.trigger.node").
-		For(&corev1.Node{}).
+		For(&v1.Node{}).
 		WithOptions(controller.Options{MaxConcurrentReconciles: 10}).
 		Complete(reconcile.AsReconciler(m.GetClient(), c))
 }

@@ -17,6 +17,7 @@ limitations under the License.
 package v1beta1
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"sort"
@@ -25,6 +26,7 @@ import (
 	"github.com/mitchellh/hashstructure/v2"
 	"github.com/robfig/cron/v3"
 	"github.com/samber/lo"
+	"go.uber.org/multierr"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -174,6 +176,7 @@ type ObjectMeta struct {
 
 // NodePool is the Schema for the NodePools API
 // +kubebuilder:object:root=true
+// +kubebuilder:storageversion
 // +kubebuilder:resource:path=nodepools,scope=Cluster,categories=karpenter
 // +kubebuilder:printcolumn:name="NodeClass",type="string",JSONPath=".spec.template.spec.nodeClassRef.name",description=""
 // +kubebuilder:printcolumn:name="Weight",type="string",JSONPath=".spec.weight",priority=1,description=""
@@ -224,6 +227,32 @@ func (nl *NodePoolList) OrderByWeight() {
 		}
 		return weightA > weightB
 	})
+}
+
+// MustGetAllowedDisruptions calls GetAllowedDisruptions and returns 0 if the error is not nil. This reduces the
+// amount of state that the disruption controller must reconcile, while allowing the GetAllowedDisruptions()
+// to bubble up any errors in validation.
+func (in *NodePool) MustGetAllowedDisruptions(ctx context.Context, c clock.Clock, numNodes int) int {
+	val, err := in.GetAllowedDisruptions(ctx, c, numNodes)
+	if err != nil {
+		return 0
+	}
+	return val
+}
+
+// GetAllowedDisruptions returns the minimum allowed disruptions across all disruption budgets for a given node pool.
+// This will return an error if there is a configuration error with any budget's node or schedule values.
+func (in *NodePool) GetAllowedDisruptions(ctx context.Context, c clock.Clock, numNodes int) (int, error) {
+	minVal := math.MaxInt32
+	var multiErr error
+	for i := range in.Spec.Disruption.Budgets {
+		val, err := in.Spec.Disruption.Budgets[i].GetAllowedDisruptions(c, numNodes)
+		if err != nil {
+			multiErr = multierr.Append(multiErr, err)
+		}
+		minVal = lo.Ternary(val < minVal, val, minVal)
+	}
+	return minVal, multiErr
 }
 
 // GetAllowedDisruptions returns an intstr.IntOrString that can be used a comparison

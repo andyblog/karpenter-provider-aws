@@ -22,7 +22,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	crmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
-	v1 "sigs.k8s.io/karpenter/pkg/apis/v1"
+	"sigs.k8s.io/karpenter/pkg/apis/v1beta1"
 	"sigs.k8s.io/karpenter/pkg/operator/injection"
 
 	"sigs.k8s.io/karpenter/pkg/cloudprovider"
@@ -45,7 +45,7 @@ const (
 // decorator implements CloudProvider
 var _ cloudprovider.CloudProvider = (*decorator)(nil)
 
-var methodDuration = prometheus.NewHistogramVec(
+var methodDurationHistogramVec = prometheus.NewHistogramVec(
 	prometheus.HistogramOpts{
 		Namespace: metrics.Namespace,
 		Subsystem: "cloudprovider",
@@ -60,7 +60,7 @@ var methodDuration = prometheus.NewHistogramVec(
 )
 
 var (
-	errorsTotal = prometheus.NewCounterVec(
+	errorsTotalCounter = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: metrics.Namespace,
 			Subsystem: "cloudprovider",
@@ -77,7 +77,7 @@ var (
 )
 
 func init() {
-	crmetrics.Registry.MustRegister(methodDuration, errorsTotal)
+	crmetrics.Registry.MustRegister(methodDurationHistogramVec, errorsTotalCounter)
 }
 
 type decorator struct {
@@ -95,62 +95,62 @@ func Decorate(cloudProvider cloudprovider.CloudProvider) cloudprovider.CloudProv
 	return &decorator{cloudProvider}
 }
 
-func (d *decorator) Create(ctx context.Context, nodeClaim *v1.NodeClaim) (*v1.NodeClaim, error) {
+func (d *decorator) Create(ctx context.Context, nodeClaim *v1beta1.NodeClaim) (*v1beta1.NodeClaim, error) {
 	method := "Create"
-	defer metrics.Measure(methodDuration.With(getLabelsMapForDuration(ctx, d, method)))()
+	defer metrics.Measure(methodDurationHistogramVec.With(getLabelsMapForDuration(ctx, d, method)))()
 	nodeClaim, err := d.CloudProvider.Create(ctx, nodeClaim)
 	if err != nil {
-		errorsTotal.With(getLabelsMapForError(ctx, d, method, err)).Inc()
+		errorsTotalCounter.With(getLabelsMapForError(ctx, d, method, err)).Inc()
 	}
 	return nodeClaim, err
 }
 
-func (d *decorator) Delete(ctx context.Context, nodeClaim *v1.NodeClaim) error {
+func (d *decorator) Delete(ctx context.Context, nodeClaim *v1beta1.NodeClaim) error {
 	method := "Delete"
-	defer metrics.Measure(methodDuration.With(getLabelsMapForDuration(ctx, d, method)))()
+	defer metrics.Measure(methodDurationHistogramVec.With(getLabelsMapForDuration(ctx, d, method)))()
 	err := d.CloudProvider.Delete(ctx, nodeClaim)
 	if err != nil {
-		errorsTotal.With(getLabelsMapForError(ctx, d, method, err)).Inc()
+		errorsTotalCounter.With(getLabelsMapForError(ctx, d, method, err)).Inc()
 	}
 	return err
 }
 
-func (d *decorator) Get(ctx context.Context, id string) (*v1.NodeClaim, error) {
+func (d *decorator) Get(ctx context.Context, id string) (*v1beta1.NodeClaim, error) {
 	method := "Get"
-	defer metrics.Measure(methodDuration.With(getLabelsMapForDuration(ctx, d, method)))()
+	defer metrics.Measure(methodDurationHistogramVec.With(getLabelsMapForDuration(ctx, d, method)))()
 	nodeClaim, err := d.CloudProvider.Get(ctx, id)
 	if err != nil {
-		errorsTotal.With(getLabelsMapForError(ctx, d, method, err)).Inc()
+		errorsTotalCounter.With(getLabelsMapForError(ctx, d, method, err)).Inc()
 	}
 	return nodeClaim, err
 }
 
-func (d *decorator) List(ctx context.Context) ([]*v1.NodeClaim, error) {
+func (d *decorator) List(ctx context.Context) ([]*v1beta1.NodeClaim, error) {
 	method := "List"
-	defer metrics.Measure(methodDuration.With(getLabelsMapForDuration(ctx, d, method)))()
+	defer metrics.Measure(methodDurationHistogramVec.With(getLabelsMapForDuration(ctx, d, method)))()
 	nodeClaims, err := d.CloudProvider.List(ctx)
 	if err != nil {
-		errorsTotal.With(getLabelsMapForError(ctx, d, method, err)).Inc()
+		errorsTotalCounter.With(getLabelsMapForError(ctx, d, method, err)).Inc()
 	}
 	return nodeClaims, err
 }
 
-func (d *decorator) GetInstanceTypes(ctx context.Context, nodePool *v1.NodePool) ([]*cloudprovider.InstanceType, error) {
+func (d *decorator) GetInstanceTypes(ctx context.Context, nodePool *v1beta1.NodePool) ([]*cloudprovider.InstanceType, error) {
 	method := "GetInstanceTypes"
-	defer metrics.Measure(methodDuration.With(getLabelsMapForDuration(ctx, d, method)))()
+	defer metrics.Measure(methodDurationHistogramVec.With(getLabelsMapForDuration(ctx, d, method)))()
 	instanceType, err := d.CloudProvider.GetInstanceTypes(ctx, nodePool)
 	if err != nil {
-		errorsTotal.With(getLabelsMapForError(ctx, d, method, err)).Inc()
+		errorsTotalCounter.With(getLabelsMapForError(ctx, d, method, err)).Inc()
 	}
 	return instanceType, err
 }
 
-func (d *decorator) IsDrifted(ctx context.Context, nodeClaim *v1.NodeClaim) (cloudprovider.DriftReason, error) {
+func (d *decorator) IsDrifted(ctx context.Context, nodeClaim *v1beta1.NodeClaim) (cloudprovider.DriftReason, error) {
 	method := "IsDrifted"
-	defer metrics.Measure(methodDuration.With(getLabelsMapForDuration(ctx, d, method)))()
+	defer metrics.Measure(methodDurationHistogramVec.With(getLabelsMapForDuration(ctx, d, method)))()
 	isDrifted, err := d.CloudProvider.IsDrifted(ctx, nodeClaim)
 	if err != nil {
-		errorsTotal.With(getLabelsMapForError(ctx, d, method, err)).Inc()
+		errorsTotalCounter.With(getLabelsMapForError(ctx, d, method, err)).Inc()
 	}
 	return isDrifted, err
 }

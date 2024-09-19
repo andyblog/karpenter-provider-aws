@@ -21,7 +21,7 @@ import (
 	"github.com/samber/lo"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	karpv1beta1 "sigs.k8s.io/karpenter/pkg/apis/v1beta1"
+	corev1beta1 "sigs.k8s.io/karpenter/pkg/apis/v1beta1"
 )
 
 // EC2NodeClassSpec is the top level specification for the AWS Karpenter Provider.
@@ -108,9 +108,9 @@ type EC2NodeClassSpec struct {
 	// (https://aws.github.io/aws-eks-best-practices/security/docs/iam/#restrict-access-to-the-instance-profile-assigned-to-the-worker-node)
 	// for limiting exposure of Instance Metadata and User Data to pods.
 	// If omitted, defaults to httpEndpoint enabled, with httpProtocolIPv6
-	// disabled, with httpPutResponseLimit of 1, and with httpTokens
+	// disabled, with httpPutResponseLimit of 2, and with httpTokens
 	// required.
-	// +kubebuilder:default={"httpEndpoint":"enabled","httpProtocolIPv6":"disabled","httpPutResponseHopLimit":1,"httpTokens":"required"}
+	// +kubebuilder:default={"httpEndpoint":"enabled","httpProtocolIPv6":"disabled","httpPutResponseHopLimit":2,"httpTokens":"required"}
 	// +optional
 	MetadataOptions *MetadataOptions `json:"metadataOptions,omitempty"`
 	// Context is a Reserved field in EC2 APIs
@@ -227,11 +227,11 @@ type MetadataOptions struct {
 
 type BlockDeviceMapping struct {
 	// The device name (for example, /dev/sdh or xvdh).
-	// +required
+	// +optional
 	DeviceName *string `json:"deviceName,omitempty"`
 	// EBS contains parameters used to automatically set up EBS volumes when an instance is launched.
 	// +kubebuilder:validation:XValidation:message="snapshotID or volumeSize must be defined",rule="has(self.snapshotID) || has(self.volumeSize)"
-	// +required
+	// +optional
 	EBS *BlockDevice `json:"ebs,omitempty"`
 	// RootVolume is a flag indicating if this device is mounted as kubelet root dir. You can
 	// configure at most one root volume in BlockDeviceMappings.
@@ -320,6 +320,7 @@ const (
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:path=ec2nodeclasses,scope=Cluster,categories=karpenter,shortName={ec2nc,ec2ncs}
 // +kubebuilder:subresource:status
+// +kubebuilder:storageversion
 type EC2NodeClass struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
@@ -356,7 +357,7 @@ func (in *EC2NodeClass) InstanceProfileRole() string {
 func (in *EC2NodeClass) InstanceProfileTags(clusterName string) map[string]string {
 	return lo.Assign(in.Spec.Tags, map[string]string{
 		fmt.Sprintf("kubernetes.io/cluster/%s", clusterName): "owned",
-		karpv1beta1.ManagedByAnnotationKey:                   clusterName,
+		corev1beta1.ManagedByAnnotationKey:                   clusterName,
 		LabelNodeClass:                                       in.Name,
 	})
 }

@@ -19,17 +19,15 @@ import (
 	"fmt"
 	"testing"
 
-	"sigs.k8s.io/karpenter/pkg/test/v1alpha1"
-
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/ec2"
 	"github.com/samber/lo"
-	corev1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
+	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	corev1beta1 "sigs.k8s.io/karpenter/pkg/apis/v1beta1"
 	coretest "sigs.k8s.io/karpenter/pkg/test"
 
 	"github.com/aws/karpenter-provider-aws/pkg/apis"
-	v1 "github.com/aws/karpenter-provider-aws/pkg/apis/v1"
+	"github.com/aws/karpenter-provider-aws/pkg/apis/v1beta1"
 	"github.com/aws/karpenter-provider-aws/pkg/controllers/nodeclaim/tagging"
 	"github.com/aws/karpenter-provider-aws/pkg/fake"
 	"github.com/aws/karpenter-provider-aws/pkg/operator/options"
@@ -37,6 +35,7 @@ import (
 	"github.com/aws/karpenter-provider-aws/pkg/test"
 
 	coreoptions "sigs.k8s.io/karpenter/pkg/operator/options"
+	"sigs.k8s.io/karpenter/pkg/operator/scheme"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -56,7 +55,7 @@ func TestAPIs(t *testing.T) {
 }
 
 var _ = BeforeSuite(func() {
-	env = coretest.NewEnvironment(coretest.WithCRDs(apis.CRDs...), coretest.WithCRDs(v1alpha1.CRDs...))
+	env = coretest.NewEnvironment(scheme.Scheme, coretest.WithCRDs(apis.CRDs...))
 	ctx = coreoptions.ToContext(ctx, coretest.Options())
 	ctx = options.ToContext(ctx, test.Options())
 	awsEnv = test.NewEnvironment(ctx, env)
@@ -88,11 +87,11 @@ var _ = Describe("TaggingController", func() {
 					Value: aws.String("owned"),
 				},
 				{
-					Key:   aws.String(karpv1.NodePoolLabelKey),
+					Key:   aws.String(corev1beta1.NodePoolLabelKey),
 					Value: aws.String("default"),
 				},
 				{
-					Key:   aws.String(v1.EKSClusterNameTagKey),
+					Key:   aws.String(corev1beta1.ManagedByAnnotationKey),
 					Value: aws.String(options.FromContext(ctx).ClusterName),
 				},
 			},
@@ -108,23 +107,23 @@ var _ = Describe("TaggingController", func() {
 	})
 
 	It("shouldn't tag instances without a Node", func() {
-		nodeClaim := coretest.NodeClaim(karpv1.NodeClaim{
-			Status: karpv1.NodeClaimStatus{
+		nodeClaim := coretest.NodeClaim(corev1beta1.NodeClaim{
+			Status: corev1beta1.NodeClaimStatus{
 				ProviderID: fake.ProviderID(*ec2Instance.InstanceId),
 			},
 		})
 
 		ExpectApplied(ctx, env.Client, nodeClaim)
 		ExpectObjectReconciled(ctx, env.Client, taggingController, nodeClaim)
-		Expect(nodeClaim.Annotations).To(Not(HaveKey(v1.AnnotationInstanceTagged)))
+		Expect(nodeClaim.Annotations).To(Not(HaveKey(v1beta1.AnnotationInstanceTagged)))
 		Expect(lo.ContainsBy(ec2Instance.Tags, func(tag *ec2.Tag) bool {
-			return *tag.Key == v1.TagName
+			return *tag.Key == v1beta1.TagName
 		})).To(BeFalse())
 	})
 
 	It("shouldn't tag nodeclaim with a malformed provderID", func() {
-		nodeClaim := coretest.NodeClaim(karpv1.NodeClaim{
-			Status: karpv1.NodeClaimStatus{
+		nodeClaim := coretest.NodeClaim(corev1beta1.NodeClaim{
+			Status: corev1beta1.NodeClaimStatus{
 				ProviderID: "Bad providerID",
 				NodeName:   "default",
 			},
@@ -132,15 +131,15 @@ var _ = Describe("TaggingController", func() {
 
 		ExpectApplied(ctx, env.Client, nodeClaim)
 		ExpectObjectReconciled(ctx, env.Client, taggingController, nodeClaim)
-		Expect(nodeClaim.Annotations).To(Not(HaveKey(v1.AnnotationInstanceTagged)))
+		Expect(nodeClaim.Annotations).To(Not(HaveKey(v1beta1.AnnotationInstanceTagged)))
 		Expect(lo.ContainsBy(ec2Instance.Tags, func(tag *ec2.Tag) bool {
-			return *tag.Key == v1.TagName
+			return *tag.Key == v1beta1.TagName
 		})).To(BeFalse())
 	})
 
 	It("should gracefully handle missing NodeClaim", func() {
-		nodeClaim := coretest.NodeClaim(karpv1.NodeClaim{
-			Status: karpv1.NodeClaimStatus{
+		nodeClaim := coretest.NodeClaim(corev1beta1.NodeClaim{
+			Status: corev1beta1.NodeClaimStatus{
 				ProviderID: fake.ProviderID(*ec2Instance.InstanceId),
 				NodeName:   "default",
 			},
@@ -152,8 +151,8 @@ var _ = Describe("TaggingController", func() {
 	})
 
 	It("should gracefully handle missing instance", func() {
-		nodeClaim := coretest.NodeClaim(karpv1.NodeClaim{
-			Status: karpv1.NodeClaimStatus{
+		nodeClaim := coretest.NodeClaim(corev1beta1.NodeClaim{
+			Status: corev1beta1.NodeClaimStatus{
 				ProviderID: fake.ProviderID(*ec2Instance.InstanceId),
 				NodeName:   "default",
 			},
@@ -162,16 +161,16 @@ var _ = Describe("TaggingController", func() {
 		ExpectApplied(ctx, env.Client, nodeClaim)
 		awsEnv.EC2API.Instances.Delete(*ec2Instance.InstanceId)
 		ExpectObjectReconciled(ctx, env.Client, taggingController, nodeClaim)
-		Expect(nodeClaim.Annotations).To(Not(HaveKey(v1.AnnotationInstanceTagged)))
+		Expect(nodeClaim.Annotations).To(Not(HaveKey(v1beta1.AnnotationInstanceTagged)))
 	})
 
 	It("shouldn't tag nodeclaim with deletion timestamp set", func() {
-		nodeClaim := coretest.NodeClaim(karpv1.NodeClaim{
-			Status: karpv1.NodeClaimStatus{
+		nodeClaim := coretest.NodeClaim(corev1beta1.NodeClaim{
+			Status: corev1beta1.NodeClaimStatus{
 				ProviderID: fake.ProviderID(*ec2Instance.InstanceId),
 				NodeName:   "default",
 			},
-			ObjectMeta: corev1.ObjectMeta{
+			ObjectMeta: v1.ObjectMeta{
 				Finalizers: []string{"testing/finalizer"},
 			},
 		})
@@ -179,17 +178,17 @@ var _ = Describe("TaggingController", func() {
 		ExpectApplied(ctx, env.Client, nodeClaim)
 		Expect(env.Client.Delete(ctx, nodeClaim)).To(Succeed())
 		ExpectObjectReconciled(ctx, env.Client, taggingController, nodeClaim)
-		Expect(nodeClaim.Annotations).To(Not(HaveKey(v1.AnnotationInstanceTagged)))
+		Expect(nodeClaim.Annotations).To(Not(HaveKey(v1beta1.AnnotationInstanceTagged)))
 		Expect(lo.ContainsBy(ec2Instance.Tags, func(tag *ec2.Tag) bool {
-			return *tag.Key == v1.TagName
+			return *tag.Key == v1beta1.TagName
 		})).To(BeFalse())
 	})
 
 	DescribeTable(
 		"should tag taggable instances",
 		func(customTags ...string) {
-			nodeClaim := coretest.NodeClaim(karpv1.NodeClaim{
-				Status: karpv1.NodeClaimStatus{
+			nodeClaim := coretest.NodeClaim(corev1beta1.NodeClaim{
+				Status: corev1beta1.NodeClaimStatus{
 					ProviderID: fake.ProviderID(*ec2Instance.InstanceId),
 					NodeName:   "default",
 				},
@@ -206,12 +205,11 @@ var _ = Describe("TaggingController", func() {
 			ExpectApplied(ctx, env.Client, nodeClaim)
 			ExpectObjectReconciled(ctx, env.Client, taggingController, nodeClaim)
 			nodeClaim = ExpectExists(ctx, env.Client, nodeClaim)
-			Expect(nodeClaim.Annotations).To(HaveKey(v1.AnnotationInstanceTagged))
+			Expect(nodeClaim.Annotations).To(HaveKey(v1beta1.AnnotationInstanceTagged))
 
 			expectedTags := map[string]string{
-				v1.TagName:              nodeClaim.Status.NodeName,
-				v1.TagNodeClaim:         nodeClaim.Name,
-				v1.EKSClusterNameTagKey: options.FromContext(ctx).ClusterName,
+				v1beta1.TagName:      nodeClaim.Status.NodeName,
+				v1beta1.TagNodeClaim: nodeClaim.Name,
 			}
 			instanceTags := instance.NewInstance(ec2Instance).Tags
 			for tag, value := range expectedTags {
@@ -221,12 +219,9 @@ var _ = Describe("TaggingController", func() {
 				Expect(instanceTags).To(HaveKeyWithValue(tag, value))
 			}
 		},
-		Entry("with the karpenter.sh/nodeclaim tag", v1.TagName, v1.EKSClusterNameTagKey),
-		Entry("with the eks:eks-cluster-name tag", v1.TagName, v1.TagNodeClaim),
-		Entry("with the Name tag", v1.TagNodeClaim, v1.EKSClusterNameTagKey),
-		Entry("with the karpenter.sh/nodeclaim and eks:eks-cluster-name tags", v1.TagName),
-		Entry("with the Name and eks:eks-cluster-name tags", v1.TagNodeClaim),
-		Entry("with the karpenter.sh/nodeclaim and Name tags", v1.EKSClusterNameTagKey),
-		Entry("with nothing to tag", v1.TagNodeClaim, v1.EKSClusterNameTagKey, v1.TagName),
+		Entry("with only karpenter.k8s.aws/nodeclaim tag", v1beta1.TagName),
+		Entry("with only Name tag", v1beta1.TagNodeClaim),
+		Entry("with both Name and karpenter.k8s.aws/nodeclaim tags"),
+		Entry("with nothing to tag", v1beta1.TagName, v1beta1.TagNodeClaim),
 	)
 })

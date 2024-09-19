@@ -20,18 +20,17 @@ import (
 	"context"
 	"errors"
 	"sort"
-	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	v1 "sigs.k8s.io/karpenter/pkg/apis/v1"
+	"sigs.k8s.io/karpenter/pkg/apis/v1beta1"
 	disruptionevents "sigs.k8s.io/karpenter/pkg/controllers/disruption/events"
 	"sigs.k8s.io/karpenter/pkg/controllers/provisioning"
 	"sigs.k8s.io/karpenter/pkg/controllers/provisioning/scheduling"
 	"sigs.k8s.io/karpenter/pkg/controllers/state"
 	"sigs.k8s.io/karpenter/pkg/events"
-	"encoding/json"
-	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/karpenter/pkg/metrics"
+	"sigs.k8s.io/karpenter/pkg/operator/options"
 )
 
 // Drift is a subreconciler that deletes drifted candidates.
@@ -53,32 +52,16 @@ func NewDrift(kubeClient client.Client, cluster *state.Cluster, provisioner *pro
 
 // ShouldDisrupt is a predicate used to filter candidates
 func (d *Drift) ShouldDisrupt(ctx context.Context, c *Candidate) bool {
-    a := c.NodeClaim.StatusConditions().Get(v1.ConditionTypeDrifted).IsTrue()
-
-	log.FromContext(ctx).V(1).
-		WithValues("Drift ShouldDisrupt", a).
-		WithValues("nodeName",c.Node.Name).
-		//WithValues("disruption",disruption).
-		//WithValues("error", err).
-		Info("#debug19")
-	time.Sleep(5*time.Millisecond)
-
-
-	return c.NodeClaim.StatusConditions().Get(v1.ConditionTypeDrifted).IsTrue()
+	return options.FromContext(ctx).FeatureGates.Drift &&
+		c.NodeClaim.StatusConditions().Get(v1beta1.ConditionTypeDrifted).IsTrue()
 }
 
 // ComputeCommand generates a disruption command given candidates
-func (d *Drift) ComputeCommand(ctx context.Context, disruptionBudgetMapping map[string]map[v1.DisruptionReason]int, candidates ...*Candidate) (Command, scheduling.Results, error) {
+func (d *Drift) ComputeCommand(ctx context.Context, disruptionBudgetMapping map[string]int, candidates ...*Candidate) (Command, scheduling.Results, error) {
 	sort.Slice(candidates, func(i int, j int) bool {
-		return candidates[i].NodeClaim.StatusConditions().Get(v1.ConditionTypeDrifted).LastTransitionTime.Time.Before(
-			candidates[j].NodeClaim.StatusConditions().Get(v1.ConditionTypeDrifted).LastTransitionTime.Time)
+		return candidates[i].NodeClaim.StatusConditions().Get(v1beta1.ConditionTypeDrifted).LastTransitionTime.Time.Before(
+			candidates[j].NodeClaim.StatusConditions().Get(v1beta1.ConditionTypeDrifted).LastTransitionTime.Time)
 	})
-
-	//data, _ := json.Marshal(&candidates)
-	//log.FromContext(ctx).V(1).
-	//	WithValues("candidates", string(data)).
-	//	Info("#debug15")
-	//time.Sleep(5*time.Millisecond)
 
 	// Do a quick check through the candidates to see if they're empty.
 	// For each candidate that is empty with a nodePool allowing its disruption
@@ -90,9 +73,9 @@ func (d *Drift) ComputeCommand(ctx context.Context, disruptionBudgetMapping map[
 		}
 		// If there's disruptions allowed for the candidate's nodepool,
 		// add it to the list of candidates, and decrement the budget.
-		if disruptionBudgetMapping[candidate.nodePool.Name][d.Reason()] > 0 {
+		if disruptionBudgetMapping[candidate.nodePool.Name] > 0 {
 			empty = append(empty, candidate)
-			disruptionBudgetMapping[candidate.nodePool.Name][d.Reason()]--
+			disruptionBudgetMapping[candidate.nodePool.Name]--
 		}
 	}
 	// Disrupt all empty drifted candidates, as they require no scheduling simulations.
@@ -103,29 +86,14 @@ func (d *Drift) ComputeCommand(ctx context.Context, disruptionBudgetMapping map[
 	}
 
 	for _, candidate := range candidates {
-
-		//data, _ := json.Marshal(&candidate)
-		log.FromContext(ctx).V(1).
-			WithValues("for each candidate", candidate.Node.Name).
-			Info("#debug16")
-		time.Sleep(5*time.Millisecond)
-
 		// If the disruption budget doesn't allow this candidate to be disrupted,
 		// continue to the next candidate. We don't need to decrement any budget
 		// counter since drift commands can only have one candidate.
-		if disruptionBudgetMapping[candidate.nodePool.Name][d.Reason()] == 0 {
+		if disruptionBudgetMapping[candidate.nodePool.Name] == 0 {
 			continue
 		}
 		// Check if we need to create any NodeClaims.
 		results, err := SimulateScheduling(ctx, d.kubeClient, d.cluster, d.provisioner, candidate)
-
-		data, _ := json.Marshal(&results)
-		log.FromContext(ctx).V(1).
-			WithValues("results", string(data)).
-			WithValues("error", err).
-			Info("#debug17")
-		time.Sleep(5*time.Millisecond)
-
 		if err != nil {
 			// if a candidate is now deleting, just retry
 			if errors.Is(err, errCandidateDeleting) {
@@ -147,12 +115,8 @@ func (d *Drift) ComputeCommand(ctx context.Context, disruptionBudgetMapping map[
 	return Command{}, scheduling.Results{}, nil
 }
 
-func (d *Drift) Reason() v1.DisruptionReason {
-	return v1.DisruptionReasonDrifted
-}
-
-func (d *Drift) Class() string {
-	return EventualDisruptionClass
+func (d *Drift) Type() string {
+	return metrics.DriftReason
 }
 
 func (d *Drift) ConsolidationType() string {

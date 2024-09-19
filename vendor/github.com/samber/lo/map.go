@@ -12,20 +12,13 @@ func Keys[K comparable, V any](in map[K]V) []K {
 	return result
 }
 
-// HasKey returns whether the given key exists.
-// Play: https://go.dev/play/p/aVwubIvECqS
-func HasKey[K comparable, V any](in map[K]V, key K) bool {
-	_, ok := in[key]
-	return ok
-}
-
 // Values creates an array of the map values.
 // Play: https://go.dev/play/p/nnRTQkzQfF6
 func Values[K comparable, V any](in map[K]V) []V {
 	result := make([]V, 0, len(in))
 
-	for k := range in {
-		result = append(result, in[k])
+	for _, v := range in {
+		result = append(result, v)
 	}
 
 	return result
@@ -42,11 +35,11 @@ func ValueOr[K comparable, V any](in map[K]V, key K, fallback V) V {
 
 // PickBy returns same map type filtered by given predicate.
 // Play: https://go.dev/play/p/kdg8GR_QMmf
-func PickBy[K comparable, V any, Map ~map[K]V](in Map, predicate func(key K, value V) bool) Map {
-	r := Map{}
-	for k := range in {
-		if predicate(k, in[k]) {
-			r[k] = in[k]
+func PickBy[K comparable, V any](in map[K]V, predicate func(key K, value V) bool) map[K]V {
+	r := map[K]V{}
+	for k, v := range in {
+		if predicate(k, v) {
+			r[k] = v
 		}
 	}
 	return r
@@ -54,11 +47,11 @@ func PickBy[K comparable, V any, Map ~map[K]V](in Map, predicate func(key K, val
 
 // PickByKeys returns same map type filtered by given keys.
 // Play: https://go.dev/play/p/R1imbuci9qU
-func PickByKeys[K comparable, V any, Map ~map[K]V](in Map, keys []K) Map {
-	r := Map{}
-	for i := range keys {
-		if v, ok := in[keys[i]]; ok {
-			r[keys[i]] = v
+func PickByKeys[K comparable, V any](in map[K]V, keys []K) map[K]V {
+	r := map[K]V{}
+	for k, v := range in {
+		if Contains(keys, k) {
+			r[k] = v
 		}
 	}
 	return r
@@ -66,11 +59,11 @@ func PickByKeys[K comparable, V any, Map ~map[K]V](in Map, keys []K) Map {
 
 // PickByValues returns same map type filtered by given values.
 // Play: https://go.dev/play/p/1zdzSvbfsJc
-func PickByValues[K comparable, V comparable, Map ~map[K]V](in Map, values []V) Map {
-	r := Map{}
-	for k := range in {
-		if Contains(values, in[k]) {
-			r[k] = in[k]
+func PickByValues[K comparable, V comparable](in map[K]V, values []V) map[K]V {
+	r := map[K]V{}
+	for k, v := range in {
+		if Contains(values, v) {
+			r[k] = v
 		}
 	}
 	return r
@@ -78,11 +71,11 @@ func PickByValues[K comparable, V comparable, Map ~map[K]V](in Map, values []V) 
 
 // OmitBy returns same map type filtered by given predicate.
 // Play: https://go.dev/play/p/EtBsR43bdsd
-func OmitBy[K comparable, V any, Map ~map[K]V](in Map, predicate func(key K, value V) bool) Map {
-	r := Map{}
-	for k := range in {
-		if !predicate(k, in[k]) {
-			r[k] = in[k]
+func OmitBy[K comparable, V any](in map[K]V, predicate func(key K, value V) bool) map[K]V {
+	r := map[K]V{}
+	for k, v := range in {
+		if !predicate(k, v) {
+			r[k] = v
 		}
 	}
 	return r
@@ -90,24 +83,23 @@ func OmitBy[K comparable, V any, Map ~map[K]V](in Map, predicate func(key K, val
 
 // OmitByKeys returns same map type filtered by given keys.
 // Play: https://go.dev/play/p/t1QjCrs-ysk
-func OmitByKeys[K comparable, V any, Map ~map[K]V](in Map, keys []K) Map {
-	r := Map{}
-	for k := range in {
-		r[k] = in[k]
-	}
-	for i := range keys {
-		delete(r, keys[i])
+func OmitByKeys[K comparable, V any](in map[K]V, keys []K) map[K]V {
+	r := map[K]V{}
+	for k, v := range in {
+		if !Contains(keys, k) {
+			r[k] = v
+		}
 	}
 	return r
 }
 
 // OmitByValues returns same map type filtered by given values.
 // Play: https://go.dev/play/p/9UYZi-hrs8j
-func OmitByValues[K comparable, V comparable, Map ~map[K]V](in Map, values []V) Map {
-	r := Map{}
-	for k := range in {
-		if !Contains(values, in[k]) {
-			r[k] = in[k]
+func OmitByValues[K comparable, V comparable](in map[K]V, values []V) map[K]V {
+	r := map[K]V{}
+	for k, v := range in {
+		if !Contains(values, v) {
+			r[k] = v
 		}
 	}
 	return r
@@ -118,10 +110,10 @@ func OmitByValues[K comparable, V comparable, Map ~map[K]V](in Map, values []V) 
 func Entries[K comparable, V any](in map[K]V) []Entry[K, V] {
 	entries := make([]Entry[K, V], 0, len(in))
 
-	for k := range in {
+	for k, v := range in {
 		entries = append(entries, Entry[K, V]{
 			Key:   k,
-			Value: in[k],
+			Value: v,
 		})
 	}
 
@@ -140,8 +132,8 @@ func ToPairs[K comparable, V any](in map[K]V) []Entry[K, V] {
 func FromEntries[K comparable, V any](entries []Entry[K, V]) map[K]V {
 	out := make(map[K]V, len(entries))
 
-	for i := range entries {
-		out[entries[i].Key] = entries[i].Value
+	for _, v := range entries {
+		out[v.Key] = v.Value
 	}
 
 	return out
@@ -161,8 +153,8 @@ func FromPairs[K comparable, V any](entries []Entry[K, V]) map[K]V {
 func Invert[K comparable, V comparable](in map[K]V) map[V]K {
 	out := make(map[V]K, len(in))
 
-	for k := range in {
-		out[in[k]] = k
+	for k, v := range in {
+		out[v] = k
 	}
 
 	return out
@@ -170,16 +162,12 @@ func Invert[K comparable, V comparable](in map[K]V) map[V]K {
 
 // Assign merges multiple maps from left to right.
 // Play: https://go.dev/play/p/VhwfJOyxf5o
-func Assign[K comparable, V any, Map ~map[K]V](maps ...Map) Map {
-	count := 0
-	for i := range maps {
-		count += len(maps[i])
-	}
+func Assign[K comparable, V any](maps ...map[K]V) map[K]V {
+	out := map[K]V{}
 
-	out := make(Map, count)
-	for i := range maps {
-		for k := range maps[i] {
-			out[k] = maps[i][k]
+	for _, m := range maps {
+		for k, v := range m {
+			out[k] = v
 		}
 	}
 
@@ -191,8 +179,8 @@ func Assign[K comparable, V any, Map ~map[K]V](maps ...Map) Map {
 func MapKeys[K comparable, V any, R comparable](in map[K]V, iteratee func(value V, key K) R) map[R]V {
 	result := make(map[R]V, len(in))
 
-	for k := range in {
-		result[iteratee(in[k], k)] = in[k]
+	for k, v := range in {
+		result[iteratee(v, k)] = v
 	}
 
 	return result
@@ -203,8 +191,8 @@ func MapKeys[K comparable, V any, R comparable](in map[K]V, iteratee func(value 
 func MapValues[K comparable, V any, R any](in map[K]V, iteratee func(value V, key K) R) map[K]R {
 	result := make(map[K]R, len(in))
 
-	for k := range in {
-		result[k] = iteratee(in[k], k)
+	for k, v := range in {
+		result[k] = iteratee(v, k)
 	}
 
 	return result
@@ -215,8 +203,8 @@ func MapValues[K comparable, V any, R any](in map[K]V, iteratee func(value V, ke
 func MapEntries[K1 comparable, V1 any, K2 comparable, V2 any](in map[K1]V1, iteratee func(key K1, value V1) (K2, V2)) map[K2]V2 {
 	result := make(map[K2]V2, len(in))
 
-	for k1 := range in {
-		k2, v2 := iteratee(k1, in[k1])
+	for k1, v1 := range in {
+		k2, v2 := iteratee(k1, v1)
 		result[k2] = v2
 	}
 
@@ -228,8 +216,8 @@ func MapEntries[K1 comparable, V1 any, K2 comparable, V2 any](in map[K1]V1, iter
 func MapToSlice[K comparable, V any, R any](in map[K]V, iteratee func(key K, value V) R) []R {
 	result := make([]R, 0, len(in))
 
-	for k := range in {
-		result = append(result, iteratee(k, in[k]))
+	for k, v := range in {
+		result = append(result, iteratee(k, v))
 	}
 
 	return result

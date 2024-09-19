@@ -16,10 +16,9 @@ package status_test
 
 import (
 	"github.com/aws/aws-sdk-go/service/eks"
-	"github.com/awslabs/operatorpkg/status"
 	"github.com/samber/lo"
 
-	v1 "github.com/aws/karpenter-provider-aws/pkg/apis/v1"
+	"github.com/aws/karpenter-provider-aws/pkg/apis/v1beta1"
 	"github.com/aws/karpenter-provider-aws/pkg/test"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -29,20 +28,19 @@ import (
 
 var _ = Describe("NodeClass Launch Template CIDR Resolution Controller", func() {
 	BeforeEach(func() {
-		nodeClass = test.EC2NodeClass(v1.EC2NodeClass{
-			Spec: v1.EC2NodeClassSpec{
-				SubnetSelectorTerms: []v1.SubnetSelectorTerm{
+		nodeClass = test.EC2NodeClass(v1beta1.EC2NodeClass{
+			Spec: v1beta1.EC2NodeClassSpec{
+				SubnetSelectorTerms: []v1beta1.SubnetSelectorTerm{
 					{
 						Tags: map[string]string{"*": "*"},
 					},
 				},
-				SecurityGroupSelectorTerms: []v1.SecurityGroupSelectorTerm{
+				SecurityGroupSelectorTerms: []v1beta1.SecurityGroupSelectorTerm{
 					{
 						Tags: map[string]string{"*": "*"},
 					},
 				},
-				AMIFamily: lo.ToPtr(v1.AMIFamilyCustom),
-				AMISelectorTerms: []v1.AMISelectorTerm{
+				AMISelectorTerms: []v1beta1.AMISelectorTerm{
 					{
 						Tags: map[string]string{"*": "*"},
 					},
@@ -52,29 +50,26 @@ var _ = Describe("NodeClass Launch Template CIDR Resolution Controller", func() 
 		// Cluster CIDR will only be resolved once per lifetime of the launch template provider, reset to nil between tests
 		awsEnv.LaunchTemplateProvider.ClusterCIDR.Store(nil)
 	})
-	DescribeTable(
-		"shouldn't resolve cluster CIDR for non-AL2023 NodeClasses",
-		func(family string, terms []v1.AMISelectorTerm) {
+	It("shouldn't resolve cluster CIDR for non-AL2023 NodeClasses", func() {
+		for _, family := range []string{
+			v1beta1.AMIFamilyAL2,
+			v1beta1.AMIFamilyBottlerocket,
+			v1beta1.AMIFamilyUbuntu,
+			v1beta1.AMIFamilyWindows2019,
+			v1beta1.AMIFamilyWindows2022,
+			v1beta1.AMIFamilyCustom,
+		} {
 			nodeClass.Spec.AMIFamily = lo.ToPtr(family)
-			nodeClass.Spec.AMISelectorTerms = terms
 			ExpectApplied(ctx, env.Client, nodeClass)
 			ExpectObjectReconciled(ctx, env.Client, statusController, nodeClass)
 			Expect(awsEnv.LaunchTemplateProvider.ClusterCIDR.Load()).To(BeNil())
-		},
-		Entry(v1.AMIFamilyAL2, v1.AMIFamilyAL2, []v1.AMISelectorTerm{{Alias: "al2@latest"}}),
-		Entry(v1.AMIFamilyBottlerocket, v1.AMIFamilyBottlerocket, []v1.AMISelectorTerm{{Alias: "bottlerocket@latest"}}),
-		Entry(v1.AMIFamilyWindows2019, v1.AMIFamilyWindows2019, []v1.AMISelectorTerm{{Alias: "windows2019@latest"}}),
-		Entry(v1.AMIFamilyWindows2022, v1.AMIFamilyWindows2022, []v1.AMISelectorTerm{{Alias: "windows2022@latest"}}),
-		Entry(v1.AMIFamilyCustom, v1.AMIFamilyCustom, []v1.AMISelectorTerm{{ID: "ami-12345"}}),
-	)
+		}
+	})
 	It("should resolve cluster CIDR for IPv4 clusters", func() {
-		nodeClass.Spec.AMIFamily = lo.ToPtr(v1.AMIFamilyAL2023)
-		nodeClass.Spec.AMISelectorTerms = []v1.AMISelectorTerm{{Alias: "al2023@latest"}}
+		nodeClass.Spec.AMIFamily = lo.ToPtr(v1beta1.AMIFamilyAL2023)
 		ExpectApplied(ctx, env.Client, nodeClass)
 		ExpectObjectReconciled(ctx, env.Client, statusController, nodeClass)
 		Expect(lo.FromPtr(awsEnv.LaunchTemplateProvider.ClusterCIDR.Load())).To(Equal("10.100.0.0/16"))
-		nodeClass = ExpectExists(ctx, env.Client, nodeClass)
-		Expect(nodeClass.StatusConditions().IsTrue(status.ConditionReady)).To(BeTrue())
 	})
 	It("should resolve cluster CIDR for IPv6 clusters", func() {
 		awsEnv.EKSAPI.DescribeClusterBehavior.Output.Set(&eks.DescribeClusterOutput{
@@ -84,12 +79,9 @@ var _ = Describe("NodeClass Launch Template CIDR Resolution Controller", func() 
 				},
 			},
 		})
-		nodeClass.Spec.AMIFamily = lo.ToPtr(v1.AMIFamilyAL2023)
-		nodeClass.Spec.AMISelectorTerms = []v1.AMISelectorTerm{{Alias: "al2023@latest"}}
+		nodeClass.Spec.AMIFamily = lo.ToPtr(v1beta1.AMIFamilyAL2023)
 		ExpectApplied(ctx, env.Client, nodeClass)
 		ExpectObjectReconciled(ctx, env.Client, statusController, nodeClass)
 		Expect(lo.FromPtr(awsEnv.LaunchTemplateProvider.ClusterCIDR.Load())).To(Equal("2001:db8::/64"))
-		nodeClass = ExpectExists(ctx, env.Client, nodeClass)
-		Expect(nodeClass.StatusConditions().IsTrue(status.ConditionReady)).To(BeTrue())
 	})
 })

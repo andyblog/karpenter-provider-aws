@@ -26,16 +26,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/awslabs/operatorpkg/object"
-	"github.com/awslabs/operatorpkg/status"
-	"k8s.io/apimachinery/pkg/runtime/schema"
-
-	"github.com/awslabs/operatorpkg/controller"
-	opmetrics "github.com/awslabs/operatorpkg/metrics"
 	"github.com/prometheus/client_golang/prometheus"
 	coordinationv1 "k8s.io/api/coordination/v1"
-	corev1 "k8s.io/api/core/v1"
-	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/klog/v2"
 	"knative.dev/pkg/changeset"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -43,11 +35,12 @@ import (
 	crmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	"sigs.k8s.io/karpenter/pkg/cloudprovider"
-	"sigs.k8s.io/karpenter/pkg/events"
+	"sigs.k8s.io/karpenter/pkg/operator/controller"
 
 	"sigs.k8s.io/karpenter/pkg/metrics"
 
 	"github.com/samber/lo"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
@@ -65,10 +58,12 @@ import (
 
 	"github.com/go-logr/zapr"
 
-	v1 "sigs.k8s.io/karpenter/pkg/apis/v1"
+	"sigs.k8s.io/karpenter/pkg/apis/v1beta1"
+	"sigs.k8s.io/karpenter/pkg/events"
 	"sigs.k8s.io/karpenter/pkg/operator/injection"
 	"sigs.k8s.io/karpenter/pkg/operator/logging"
 	"sigs.k8s.io/karpenter/pkg/operator/options"
+	"sigs.k8s.io/karpenter/pkg/operator/scheme"
 	"sigs.k8s.io/karpenter/pkg/webhooks"
 )
 
@@ -94,8 +89,6 @@ var Version = "unspecified"
 
 func init() {
 	crmetrics.Registry.MustRegister(BuildInfo)
-	opmetrics.RegisterClientMetrics(crmetrics.Registry)
-
 	BuildInfo.WithLabelValues(Version, runtime.Version(), runtime.GOARCH, changeset.Get()).Set(1)
 }
 
@@ -133,11 +126,6 @@ func NewOperator() (context.Context, *Operator) {
 		GracePeriod: 5 * time.Second,
 	})
 
-	// Logging
-	logger := zapr.NewLogger(logging.NewLogger(ctx, component))
-	log.SetLogger(logger)
-	klog.SetLogger(logger)
-
 	// Client Config
 	config := ctrl.GetConfigOrDie()
 	config.RateLimiter = flowcontrol.NewTokenBucketRateLimiter(float32(options.FromContext(ctx).KubeClientQPS), options.FromContext(ctx).KubeClientBurst)
@@ -146,16 +134,22 @@ func NewOperator() (context.Context, *Operator) {
 	// Client
 	kubernetesInterface := kubernetes.NewForConfigOrDie(config)
 
+	// Logging
+	logger := zapr.NewLogger(logging.NewLogger(ctx, component))
+	log.SetLogger(logger)
+	klog.SetLogger(logger)
+
 	log.FromContext(ctx).WithValues("version", Version).V(1).Info("discovered karpenter version")
 
 	// Manager
 	mgrOpts := ctrl.Options{
 		Logger:                        logging.IgnoreDebugEvents(logger),
-		LeaderElection:                !options.FromContext(ctx).DisableLeaderElection,
+		LeaderElection:                options.FromContext(ctx).EnableLeaderElection,
 		LeaderElectionID:              "karpenter-leader-election",
 		LeaderElectionResourceLock:    resourcelock.LeasesResourceLock,
 		LeaderElectionNamespace:       system.Namespace(),
 		LeaderElectionReleaseOnCancel: true,
+		Scheme:                        scheme.Scheme,
 		Metrics: server.Options{
 			BindAddress: fmt.Sprintf(":%d", options.FromContext(ctx).MetricsPort),
 		},
@@ -192,36 +186,24 @@ func NewOperator() (context.Context, *Operator) {
 	}
 	mgr, err := ctrl.NewManager(config, mgrOpts)
 	mgr = lo.Must(mgr, err, "failed to setup manager")
-	lo.Must0(mgr.GetFieldIndexer().IndexField(ctx, &corev1.Pod{}, "spec.nodeName", func(o client.Object) []string {
-		return []string{o.(*corev1.Pod).Spec.NodeName}
+	lo.Must0(mgr.GetFieldIndexer().IndexField(ctx, &v1.Pod{}, "spec.nodeName", func(o client.Object) []string {
+		return []string{o.(*v1.Pod).Spec.NodeName}
 	}), "failed to setup pod indexer")
-	lo.Must0(mgr.GetFieldIndexer().IndexField(ctx, &corev1.Node{}, "spec.providerID", func(o client.Object) []string {
-		return []string{o.(*corev1.Node).Spec.ProviderID}
+	lo.Must0(mgr.GetFieldIndexer().IndexField(ctx, &v1.Node{}, "spec.providerID", func(o client.Object) []string {
+		return []string{o.(*v1.Node).Spec.ProviderID}
 	}), "failed to setup node provider id indexer")
-	lo.Must0(mgr.GetFieldIndexer().IndexField(ctx, &v1.NodeClaim{}, "status.providerID", func(o client.Object) []string {
-		return []string{o.(*v1.NodeClaim).Status.ProviderID}
+	lo.Must0(mgr.GetFieldIndexer().IndexField(ctx, &v1beta1.NodeClaim{}, "status.providerID", func(o client.Object) []string {
+		return []string{o.(*v1beta1.NodeClaim).Status.ProviderID}
 	}), "failed to setup nodeclaim provider id indexer")
-	lo.Must0(mgr.GetFieldIndexer().IndexField(ctx, &v1.NodeClaim{}, "spec.nodeClassRef.group", func(o client.Object) []string {
-		return []string{o.(*v1.NodeClaim).Spec.NodeClassRef.Group}
+	lo.Must0(mgr.GetFieldIndexer().IndexField(ctx, &v1beta1.NodeClaim{}, "spec.nodeClassRef.apiVersion", func(o client.Object) []string {
+		return []string{o.(*v1beta1.NodeClaim).Spec.NodeClassRef.APIVersion}
 	}), "failed to setup nodeclaim nodeclassref apiversion indexer")
-	lo.Must0(mgr.GetFieldIndexer().IndexField(ctx, &v1.NodeClaim{}, "spec.nodeClassRef.kind", func(o client.Object) []string {
-		return []string{o.(*v1.NodeClaim).Spec.NodeClassRef.Kind}
+	lo.Must0(mgr.GetFieldIndexer().IndexField(ctx, &v1beta1.NodeClaim{}, "spec.nodeClassRef.kind", func(o client.Object) []string {
+		return []string{o.(*v1beta1.NodeClaim).Spec.NodeClassRef.Kind}
 	}), "failed to setup nodeclaim nodeclassref kind indexer")
-	lo.Must0(mgr.GetFieldIndexer().IndexField(ctx, &v1.NodeClaim{}, "spec.nodeClassRef.name", func(o client.Object) []string {
-		return []string{o.(*v1.NodeClaim).Spec.NodeClassRef.Name}
+	lo.Must0(mgr.GetFieldIndexer().IndexField(ctx, &v1beta1.NodeClaim{}, "spec.nodeClassRef.name", func(o client.Object) []string {
+		return []string{o.(*v1beta1.NodeClaim).Spec.NodeClassRef.Name}
 	}), "failed to setup nodeclaim nodeclassref name indexer")
-	lo.Must0(mgr.GetFieldIndexer().IndexField(ctx, &v1.NodePool{}, "spec.template.spec.nodeClassRef.group", func(o client.Object) []string {
-		return []string{o.(*v1.NodePool).Spec.Template.Spec.NodeClassRef.Group}
-	}), "failed to setup nodepool nodeclassref apiversion indexer")
-	lo.Must0(mgr.GetFieldIndexer().IndexField(ctx, &v1.NodePool{}, "spec.template.spec.nodeClassRef.kind", func(o client.Object) []string {
-		return []string{o.(*v1.NodePool).Spec.Template.Spec.NodeClassRef.Kind}
-	}), "failed to setup nodepool nodeclassref kind indexer")
-	lo.Must0(mgr.GetFieldIndexer().IndexField(ctx, &v1.NodePool{}, "spec.template.spec.nodeClassRef.name", func(o client.Object) []string {
-		return []string{o.(*v1.NodePool).Spec.Template.Spec.NodeClassRef.Name}
-	}), "failed to setup nodepool nodeclassref name indexer")
-	lo.Must0(mgr.GetFieldIndexer().IndexField(ctx, &storagev1.VolumeAttachment{}, "spec.nodeName", func(o client.Object) []string {
-		return []string{o.(*storagev1.VolumeAttachment).Spec.NodeName}
-	}), "failed to setup volumeattachment indexer")
 
 	lo.Must0(mgr.AddHealthzCheck("healthz", healthz.Ping))
 	lo.Must0(mgr.AddReadyzCheck("readyz", healthz.Ping))
@@ -258,18 +240,20 @@ func (o *Operator) Start(ctx context.Context, cp cloudprovider.CloudProvider) {
 		lo.Must0(o.Manager.Start(ctx))
 	}()
 	if options.FromContext(ctx).DisableWebhook {
-		log.FromContext(ctx).Info("conversion webhooks are disabled")
+		log.FromContext(ctx).Info("webhook disabled")
 	} else {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			// Taking the first supported NodeClass to be the default NodeClass
-			gvk := lo.Map(cp.GetSupportedNodeClasses(), func(nc status.Object, _ int) schema.GroupVersionKind {
-				return object.GVK(nc)
-			})
-			ctx = injection.WithNodeClasses(ctx, gvk)
+			ctx = injection.WithNodeClasses(ctx, cp.GetSupportedNodeClasses())
 			ctx = injection.WithClient(ctx, o.GetClient())
 			webhooks.Start(ctx, o.GetConfig(), o.webhooks...)
+		}()
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			webhooks.ValidateConversionEnabled(ctx, o.GetClient())
 		}()
 	}
 	wg.Wait()

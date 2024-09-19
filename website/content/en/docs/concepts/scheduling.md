@@ -152,7 +152,6 @@ Take care to ensure the label domains are correct. A well known label like `karp
 | karpenter.k8s.aws/instance-cpu                                 | 32          | [AWS Specific] Number of CPUs on the instance                                                                                                                   |
 | karpenter.k8s.aws/instance-cpu-manufacturer                    | aws          | [AWS Specific] Name of the CPU manufacturer                                                                                                                   |
 | karpenter.k8s.aws/instance-memory                              | 131072      | [AWS Specific] Number of mebibytes of memory on the instance                                                                                                    |
-| karpenter.k8s.aws/instance-ebs-bandwidth                       | 9500        | [AWS Specific] Number of [maximum megabits](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ebs-optimized.html#ebs-optimization-performance) of EBS available on the instance |
 | karpenter.k8s.aws/instance-network-bandwidth                   | 131072      | [AWS Specific] Number of [baseline megabits](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-instance-network-bandwidth.html) available on the instance |
 | karpenter.k8s.aws/instance-pods                                | 110         | [AWS Specific] Number of pods the instance supports                                                                                                             |
 | karpenter.k8s.aws/instance-gpu-name                            | t4          | [AWS Specific] Name of the GPU on the instance, if available                                                                                                    |
@@ -174,9 +173,6 @@ requirements:
   - key: user.defined.label/type
     operator: Exists
 ```
-{{% alert title="Note" color="primary" %}}
-There is currently a limit of 30 on the total number of requirements on both the NodePool and the NodeClaim. It's important to note that `spec.template.metadata.labels` are also propagated as requirements on the NodeClaim when it's created, meaning that you can't have more than 30 requirements and labels combined set on your NodePool.
-{{% /alert %}}
 
 #### Node selectors
 
@@ -284,7 +280,7 @@ spec:
           - p3
       taints:
       - key: nvidia.com/gpu
-        value: "true"
+        value: true
         effect: "NoSchedule"
 ```
 

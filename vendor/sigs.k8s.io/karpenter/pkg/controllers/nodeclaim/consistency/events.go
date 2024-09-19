@@ -17,16 +17,16 @@ limitations under the License.
 package consistency
 
 import (
-	corev1 "k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 
-	v1 "sigs.k8s.io/karpenter/pkg/apis/v1"
+	"sigs.k8s.io/karpenter/pkg/apis/v1beta1"
 	"sigs.k8s.io/karpenter/pkg/events"
 )
 
-func FailedConsistencyCheckEvent(nodeClaim *v1.NodeClaim, message string) events.Event {
+func FailedConsistencyCheckEvent(nodeClaim *v1beta1.NodeClaim, message string) events.Event {
 	return events.Event{
 		InvolvedObject: nodeClaim,
-		Type:           corev1.EventTypeWarning,
+		Type:           v1.EventTypeWarning,
 		Reason:         "FailedConsistencyCheck",
 		Message:        message,
 		DedupeValues:   []string{string(nodeClaim.UID), message},

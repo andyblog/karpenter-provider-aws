@@ -2,22 +2,14 @@ package test
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"sync"
 	"time"
 
 	"github.com/awslabs/operatorpkg/object"
-	"github.com/awslabs/operatorpkg/singleton"
 	"github.com/awslabs/operatorpkg/status"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	"github.com/onsi/gomega/types"
-	"github.com/samber/lo"
-	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
@@ -29,30 +21,16 @@ const (
 	FastPolling = 10 * time.Millisecond
 )
 
-func ExpectObjectReconciled[T client.Object](ctx context.Context, c client.Client, reconciler reconcile.ObjectReconciler[T], object T) types.Assertion {
+func ExpectObjectReconciled[T client.Object](ctx context.Context, c client.Client, reconciler reconcile.ObjectReconciler[T], object T) reconcile.Result {
 	GinkgoHelper()
 	result, err := reconcile.AsReconciler(c, reconciler).Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(object)})
-	Expect(err).ToNot(HaveOccurred())
-	return Expect(result)
-}
-
-func ExpectObjectReconcileFailed[T client.Object](ctx context.Context, c client.Client, reconciler reconcile.ObjectReconciler[T], object T) types.Assertion {
-	GinkgoHelper()
-	_, err := reconcile.AsReconciler(c, reconciler).Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(object)})
-	Expect(err).To(HaveOccurred())
-	return Expect(err)
-}
-
-func ExpectSingletonReconciled(ctx context.Context, reconciler singleton.Reconciler) reconcile.Result {
-	GinkgoHelper()
-	result, err := singleton.AsReconciler(reconciler).Reconcile(ctx, reconcile.Request{})
 	Expect(err).ToNot(HaveOccurred())
 	return result
 }
 
-func ExpectSingletonReconcileFailed(ctx context.Context, reconciler singleton.Reconciler) error {
+func ExpectObjectReconcileFailed[T client.Object](ctx context.Context, c client.Client, reconciler reconcile.ObjectReconciler[T], object T) error {
 	GinkgoHelper()
-	_, err := singleton.AsReconciler(reconciler).Reconcile(ctx, reconcile.Request{})
+	_, err := reconcile.AsReconciler(c, reconciler).Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(object)})
 	Expect(err).To(HaveOccurred())
 	return err
 }
@@ -65,10 +43,9 @@ func ExpectReconciled(ctx context.Context, reconciler reconcile.Reconciler, obje
 	return result
 }
 
-func ExpectObject[T client.Object](ctx context.Context, c client.Client, obj T) types.Assertion {
+func ExpectGet[T client.Object](ctx context.Context, c client.Client, obj T) {
 	GinkgoHelper()
 	Expect(c.Get(ctx, client.ObjectKeyFromObject(obj), obj)).To(Succeed())
-	return Expect(obj)
 }
 
 func ExpectNotFound(ctx context.Context, c client.Client, objects ...client.Object) {
@@ -100,7 +77,7 @@ func ExpectApplied(ctx context.Context, c client.Client, objects ...client.Objec
 		}
 
 		// Re-get the object to grab the updated spec and status
-		ExpectObject(ctx, c, o)
+		ExpectGet(ctx, c, o)
 	}
 }
 
@@ -141,7 +118,7 @@ func ExpectStatusUpdated(ctx context.Context, c client.Client, objects ...client
 		// optimistic locking issues if other threads are updating objects
 		// e.g. pod statuses being updated during integration tests.
 		Expect(c.Status().Update(ctx, o.DeepCopyObject().(client.Object))).To(Succeed())
-		ExpectObject(ctx, c, o)
+		ExpectGet(ctx, c, o)
 	}
 }
 
@@ -151,37 +128,4 @@ func ExpectDeleted(ctx context.Context, c client.Client, objects ...client.Objec
 		Expect(c.Delete(ctx, o)).To(Succeed())
 		Expect(c.Get(ctx, client.ObjectKeyFromObject(o), o)).To(Or(Succeed(), MatchError(ContainSubstring("not found"))))
 	}
-}
-
-func ExpectCleanedUp(ctx context.Context, c client.Client, objectLists ...client.ObjectList) {
-	wg := sync.WaitGroup{}
-	namespaces := &v1.NamespaceList{}
-	Expect(c.List(ctx, namespaces)).To(Succeed())
-	for _, objectList := range objectLists {
-		for _, namespace := range namespaces.Items {
-			wg.Add(1)
-			go func(objectList client.ObjectList, namespace string) {
-				defer GinkgoRecover()
-				defer wg.Done()
-
-				unstructuredList := &unstructured.UnstructuredList{}
-				unstructuredList.UnmarshalJSON(lo.Must(json.Marshal(objectList)))
-				unstructuredList.SetAPIVersion(object.GVK(objectList).GroupVersion().String())
-				unstructuredList.SetKind(object.GVK(objectList).Kind)
-
-				Expect(c.List(ctx, unstructuredList)).To(Succeed())
-				unstructuredList.EachListItem(func(o runtime.Object) error {
-					o.(client.Object).SetFinalizers([]string{})
-					if err := c.Update(ctx, o.(client.Object)); err != nil {
-						return err
-					}
-					if err := c.Delete(ctx, o.(client.Object)); err != nil {
-						return err
-					}
-					return nil
-				})
-			}(objectList, namespace.Name)
-		}
-	}
-	wg.Wait()
 }

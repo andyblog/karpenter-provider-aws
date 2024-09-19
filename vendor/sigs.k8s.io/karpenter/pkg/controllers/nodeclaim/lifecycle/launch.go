@@ -23,12 +23,12 @@ import (
 	"github.com/patrickmn/go-cache"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/samber/lo"
-	corev1 "k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	v1 "sigs.k8s.io/karpenter/pkg/apis/v1"
+	"sigs.k8s.io/karpenter/pkg/apis/v1beta1"
 	"sigs.k8s.io/karpenter/pkg/cloudprovider"
 	"sigs.k8s.io/karpenter/pkg/events"
 	"sigs.k8s.io/karpenter/pkg/metrics"
@@ -42,13 +42,13 @@ type Launch struct {
 	recorder      events.Recorder
 }
 
-func (l *Launch) Reconcile(ctx context.Context, nodeClaim *v1.NodeClaim) (reconcile.Result, error) {
-	if !nodeClaim.StatusConditions().Get(v1.ConditionTypeLaunched).IsUnknown() {
+func (l *Launch) Reconcile(ctx context.Context, nodeClaim *v1beta1.NodeClaim) (reconcile.Result, error) {
+	if nodeClaim.StatusConditions().Get(v1beta1.ConditionTypeLaunched).IsTrue() {
 		return reconcile.Result{}, nil
 	}
 
 	var err error
-	var created *v1.NodeClaim
+	var created *v1beta1.NodeClaim
 
 	// One of the following scenarios can happen with a NodeClaim that isn't marked as launched:
 	//  1. It was already launched by the CloudProvider but the client-go cache wasn't updated quickly enough or
@@ -56,21 +56,28 @@ func (l *Launch) Reconcile(ctx context.Context, nodeClaim *v1.NodeClaim) (reconc
 	//  2. It is a standard NodeClaim launch where we should call CloudProvider Create() and fill in details of the launched
 	//     NodeClaim into the NodeClaim CR.
 	if ret, ok := l.cache.Get(string(nodeClaim.UID)); ok {
-		created = ret.(*v1.NodeClaim)
+		created = ret.(*v1beta1.NodeClaim)
 	} else {
 		created, err = l.launchNodeClaim(ctx, nodeClaim)
 	}
-	// Either the Node launch failed or the Node was deleted due to InsufficientCapacity/NodeClassNotReady/NotFound
+	// Either the Node launch failed or the Node was deleted due to InsufficientCapacity/NotFound
 	if err != nil || created == nil {
+		if cloudprovider.IsNodeClassNotReadyError(err) {
+			return reconcile.Result{Requeue: true}, nil
+		}
 		return reconcile.Result{}, err
 	}
 	l.cache.SetDefault(string(nodeClaim.UID), created)
 	nodeClaim = PopulateNodeClaimDetails(nodeClaim, created)
-	nodeClaim.StatusConditions().SetTrue(v1.ConditionTypeLaunched)
+	nodeClaim.StatusConditions().SetTrue(v1beta1.ConditionTypeLaunched)
+	metrics.NodeClaimsLaunchedCounter.With(prometheus.Labels{
+		metrics.NodePoolLabel: nodeClaim.Labels[v1beta1.NodePoolLabelKey],
+	}).Inc()
+
 	return reconcile.Result{}, nil
 }
 
-func (l *Launch) launchNodeClaim(ctx context.Context, nodeClaim *v1.NodeClaim) (*v1.NodeClaim, error) {
+func (l *Launch) launchNodeClaim(ctx context.Context, nodeClaim *v1beta1.NodeClaim) (*v1beta1.NodeClaim, error) {
 	created, err := l.cloudProvider.Create(ctx, nodeClaim)
 	if err != nil {
 		switch {
@@ -81,38 +88,31 @@ func (l *Launch) launchNodeClaim(ctx context.Context, nodeClaim *v1.NodeClaim) (
 			if err = l.kubeClient.Delete(ctx, nodeClaim); err != nil {
 				return nil, client.IgnoreNotFound(err)
 			}
-			metrics.NodeClaimsDisruptedTotal.With(prometheus.Labels{
+			metrics.NodeClaimsTerminatedCounter.With(prometheus.Labels{
 				metrics.ReasonLabel:       "insufficient_capacity",
-				metrics.NodePoolLabel:     nodeClaim.Labels[v1.NodePoolLabelKey],
-				metrics.CapacityTypeLabel: nodeClaim.Labels[v1.CapacityTypeLabelKey],
+				metrics.NodePoolLabel:     nodeClaim.Labels[v1beta1.NodePoolLabelKey],
+				metrics.CapacityTypeLabel: nodeClaim.Labels[v1beta1.CapacityTypeLabelKey],
 			}).Inc()
 			return nil, nil
 		case cloudprovider.IsNodeClassNotReadyError(err):
-			log.FromContext(ctx).Error(err, "failed launching nodeclaim")
-			if err = l.kubeClient.Delete(ctx, nodeClaim); err != nil {
-				return nil, client.IgnoreNotFound(err)
-			}
-			metrics.NodeClaimsDisruptedTotal.With(prometheus.Labels{
-				metrics.ReasonLabel:       "nodeclass_not_ready",
-				metrics.NodePoolLabel:     nodeClaim.Labels[v1.NodePoolLabelKey],
-				metrics.CapacityTypeLabel: nodeClaim.Labels[v1.CapacityTypeLabelKey],
-			}).Inc()
-			return nil, nil
+			l.recorder.Publish(NodeClassNotReadyEvent(nodeClaim, err))
+			nodeClaim.StatusConditions().SetFalse(v1beta1.ConditionTypeLaunched, "LaunchFailed", truncateMessage(err.Error()))
+			return nil, fmt.Errorf("launching nodeclaim, %w", err)
 		default:
-			nodeClaim.StatusConditions().SetUnknownWithReason(v1.ConditionTypeLaunched, "LaunchFailed", truncateMessage(err.Error()))
+			nodeClaim.StatusConditions().SetFalse(v1beta1.ConditionTypeLaunched, "LaunchFailed", truncateMessage(err.Error()))
 			return nil, fmt.Errorf("launching nodeclaim, %w", err)
 		}
 	}
 	log.FromContext(ctx).WithValues(
 		"provider-id", created.Status.ProviderID,
-		"instance-type", created.Labels[corev1.LabelInstanceTypeStable],
-		"zone", created.Labels[corev1.LabelTopologyZone],
-		"capacity-type", created.Labels[v1.CapacityTypeLabelKey],
+		"instance-type", created.Labels[v1.LabelInstanceTypeStable],
+		"zone", created.Labels[v1.LabelTopologyZone],
+		"capacity-type", created.Labels[v1beta1.CapacityTypeLabelKey],
 		"allocatable", created.Status.Allocatable).Info("launched nodeclaim")
 	return created, nil
 }
 
-func PopulateNodeClaimDetails(nodeClaim, retrieved *v1.NodeClaim) *v1.NodeClaim {
+func PopulateNodeClaimDetails(nodeClaim, retrieved *v1beta1.NodeClaim) *v1beta1.NodeClaim {
 	// These are ordered in priority order so that user-defined nodeClaim labels and requirements trump retrieved labels
 	// or the static nodeClaim labels
 	nodeClaim.Labels = lo.Assign(

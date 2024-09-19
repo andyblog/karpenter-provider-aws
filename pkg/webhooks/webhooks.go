@@ -21,9 +21,10 @@ import (
 	"knative.dev/pkg/configmap"
 	"knative.dev/pkg/controller"
 	knativeinjection "knative.dev/pkg/injection"
+	"knative.dev/pkg/webhook/resourcesemantics"
 	"knative.dev/pkg/webhook/resourcesemantics/conversion"
-
-	"github.com/awslabs/operatorpkg/object"
+	"knative.dev/pkg/webhook/resourcesemantics/defaulting"
+	"knative.dev/pkg/webhook/resourcesemantics/validation"
 
 	v1 "github.com/aws/karpenter-provider-aws/pkg/apis/v1"
 	"github.com/aws/karpenter-provider-aws/pkg/apis/v1beta1"
@@ -31,7 +32,7 @@ import (
 
 var (
 	ConversionResource = map[schema.GroupKind]conversion.GroupKindConversion{
-		object.GVK(&v1.EC2NodeClass{}).GroupKind(): {
+		v1beta1.SchemeGroupVersion.WithKind("EC2NodeClass").GroupKind(): {
 			DefinitionName: "ec2nodeclasses.karpenter.k8s.aws",
 			HubVersion:     "v1",
 			Zygotes: map[string]conversion.ConvertibleObject{
@@ -44,6 +45,8 @@ var (
 
 func NewWebhooks() []knativeinjection.ControllerConstructor {
 	return []knativeinjection.ControllerConstructor{
+		NewCRDDefaultingWebhook,
+		NewCRDValidationWebhook,
 		NewCRDConversionWebhook,
 	}
 }
@@ -54,4 +57,28 @@ func NewCRDConversionWebhook(ctx context.Context, _ configmap.Watcher) *controll
 		ConversionResource,
 		func(ctx context.Context) context.Context { return ctx },
 	)
+}
+
+func NewCRDDefaultingWebhook(ctx context.Context, _ configmap.Watcher) *controller.Impl {
+	return defaulting.NewAdmissionController(ctx,
+		"defaulting.webhook.karpenter.k8s.aws",
+		"/default/karpenter.k8s.aws",
+		Resources,
+		func(ctx context.Context) context.Context { return ctx },
+		true,
+	)
+}
+
+func NewCRDValidationWebhook(ctx context.Context, _ configmap.Watcher) *controller.Impl {
+	return validation.NewAdmissionController(ctx,
+		"validation.webhook.karpenter.k8s.aws",
+		"/validate/karpenter.k8s.aws",
+		Resources,
+		func(ctx context.Context) context.Context { return ctx },
+		true,
+	)
+}
+
+var Resources = map[schema.GroupVersionKind]resourcesemantics.GenericCRD{
+	v1beta1.SchemeGroupVersion.WithKind("EC2NodeClass"): &v1beta1.EC2NodeClass{},
 }

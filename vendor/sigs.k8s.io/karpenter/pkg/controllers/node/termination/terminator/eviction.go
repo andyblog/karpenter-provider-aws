@@ -23,11 +23,8 @@ import (
 	"sync"
 	"time"
 
-	"sigs.k8s.io/karpenter/pkg/metrics"
-
-	"github.com/awslabs/operatorpkg/singleton"
 	"github.com/samber/lo"
-	corev1 "k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -35,15 +32,14 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
-	controllerruntime "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	"sigs.k8s.io/karpenter/pkg/operator/injection"
-
 	terminatorevents "sigs.k8s.io/karpenter/pkg/controllers/node/termination/terminator/events"
+	"sigs.k8s.io/karpenter/pkg/operator/controller"
+
 	"sigs.k8s.io/karpenter/pkg/events"
 )
 
@@ -73,7 +69,7 @@ type QueueKey struct {
 	UID types.UID
 }
 
-func NewQueueKey(pod *corev1.Pod) QueueKey {
+func NewQueueKey(pod *v1.Pod) QueueKey {
 	return QueueKey{
 		NamespacedName: client.ObjectKeyFromObject(pod),
 		UID:            pod.UID,
@@ -92,28 +88,22 @@ type Queue struct {
 
 func NewQueue(kubeClient client.Client, recorder events.Recorder) *Queue {
 	queue := &Queue{
-		RateLimitingInterface: workqueue.NewRateLimitingQueueWithConfig(
-			workqueue.NewItemExponentialFailureRateLimiter(evictionQueueBaseDelay, evictionQueueMaxDelay),
-			workqueue.RateLimitingQueueConfig{
-				Name:            "eviction.workqueue",
-				MetricsProvider: metrics.WorkqueueMetricsProvider{},
-			}),
-		set:        sets.New[QueueKey](),
-		kubeClient: kubeClient,
-		recorder:   recorder,
+		RateLimitingInterface: workqueue.NewRateLimitingQueue(workqueue.NewItemExponentialFailureRateLimiter(evictionQueueBaseDelay, evictionQueueMaxDelay)),
+		set:                   sets.New[QueueKey](),
+		kubeClient:            kubeClient,
+		recorder:              recorder,
 	}
 	return queue
 }
 
 func (q *Queue) Register(_ context.Context, m manager.Manager) error {
-	return controllerruntime.NewControllerManagedBy(m).
+	return controller.NewSingletonManagedBy(m).
 		Named("eviction-queue").
-		WatchesRawSource(singleton.Source()).
-		Complete(singleton.AsReconciler(q))
+		Complete(q)
 }
 
 // Add adds pods to the Queue
-func (q *Queue) Add(pods ...*corev1.Pod) {
+func (q *Queue) Add(pods ...*v1.Pod) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
@@ -126,15 +116,15 @@ func (q *Queue) Add(pods ...*corev1.Pod) {
 	}
 }
 
-func (q *Queue) Has(pod *corev1.Pod) bool {
+func (q *Queue) Has(pod *v1.Pod) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
 	return q.set.Has(NewQueueKey(pod))
 }
 
-func (q *Queue) Reconcile(ctx context.Context) (reconcile.Result, error) {
-	ctx = injection.WithControllerName(ctx, "eviction-queue")
+func (q *Queue) Reconcile(ctx context.Context, _ reconcile.Request) (reconcile.Result, error) {
+	EvictionQueueDepth.Set(float64(q.RateLimitingInterface.Len()))
 	// Check if the queue is empty. client-go recommends not using this function to gate the subsequent
 	// get call, but since we're popping items off the queue synchronously, there should be no synchonization
 	// issues.
@@ -146,29 +136,26 @@ func (q *Queue) Reconcile(ctx context.Context) (reconcile.Result, error) {
 	if shutdown {
 		return reconcile.Result{}, fmt.Errorf("EvictionQueue is broken and has shutdown")
 	}
-
 	qk := item.(QueueKey)
 	defer q.RateLimitingInterface.Done(qk)
-
-	// Evict the pod
+	// Evict pod
 	if q.Evict(ctx, qk) {
 		q.RateLimitingInterface.Forget(qk)
 		q.mu.Lock()
 		q.set.Delete(qk)
 		q.mu.Unlock()
-		return reconcile.Result{RequeueAfter: singleton.RequeueImmediately}, nil
+		return reconcile.Result{RequeueAfter: controller.Immediately}, nil
 	}
-
 	// Requeue pod if eviction failed
 	q.RateLimitingInterface.AddRateLimited(qk)
-	return reconcile.Result{RequeueAfter: singleton.RequeueImmediately}, nil
+	return reconcile.Result{RequeueAfter: controller.Immediately}, nil
 }
 
-// Evict returns true if successful eviction call, and false if there was an eviction-related error
+// Evict returns true if successful eviction call, and false if not an eviction-related error
 func (q *Queue) Evict(ctx context.Context, key QueueKey) bool {
 	ctx = log.IntoContext(ctx, log.FromContext(ctx).WithValues("Pod", klog.KRef(key.Namespace, key.Name)))
 	if err := q.kubeClient.SubResource("eviction").Create(ctx,
-		&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: key.Namespace, Name: key.Name}},
+		&v1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: key.Namespace, Name: key.Name}},
 		&policyv1.Eviction{
 			DeleteOptions: &metav1.DeleteOptions{
 				Preconditions: &metav1.Preconditions{
@@ -186,7 +173,7 @@ func (q *Queue) Evict(ctx context.Context, key QueueKey) bool {
 			return true
 		}
 		if apierrors.IsTooManyRequests(err) { // 429 - PDB violation
-			q.recorder.Publish(terminatorevents.NodeFailedToDrain(&corev1.Node{ObjectMeta: metav1.ObjectMeta{
+			q.recorder.Publish(terminatorevents.NodeFailedToDrain(&v1.Node{ObjectMeta: metav1.ObjectMeta{
 				Name:      key.Name,
 				Namespace: key.Namespace,
 			}}, fmt.Errorf("evicting pod %s/%s violates a PDB", key.Namespace, key.Name)))
@@ -195,7 +182,7 @@ func (q *Queue) Evict(ctx context.Context, key QueueKey) bool {
 		log.FromContext(ctx).Error(err, "failed evicting pod")
 		return false
 	}
-	q.recorder.Publish(terminatorevents.EvictPod(&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace}}))
+	q.recorder.Publish(terminatorevents.EvictPod(&v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace}}))
 	return true
 }
 
@@ -203,11 +190,6 @@ func (q *Queue) Reset() {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
-	q.RateLimitingInterface = workqueue.NewRateLimitingQueueWithConfig(
-		workqueue.NewItemExponentialFailureRateLimiter(evictionQueueBaseDelay, evictionQueueMaxDelay),
-		workqueue.RateLimitingQueueConfig{
-			Name:            "eviction.workqueue",
-			MetricsProvider: metrics.WorkqueueMetricsProvider{},
-		})
+	q.RateLimitingInterface = workqueue.NewRateLimitingQueue(workqueue.NewItemExponentialFailureRateLimiter(evictionQueueBaseDelay, evictionQueueMaxDelay))
 	q.set = sets.New[QueueKey]()
 }

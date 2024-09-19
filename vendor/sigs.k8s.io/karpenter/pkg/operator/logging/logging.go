@@ -18,7 +18,10 @@ package logging
 
 import (
 	"context"
-	"strings"
+	"encoding/json"
+	"fmt"
+	"log"
+	"os"
 
 	"github.com/go-logr/logr"
 	"github.com/go-logr/zapr"
@@ -30,6 +33,11 @@ import (
 	"knative.dev/pkg/logging/logkey"
 
 	"sigs.k8s.io/karpenter/pkg/operator/options"
+)
+
+const (
+	loggerCfgDir      = "/etc/karpenter/logging"
+	loggerCfgFilePath = loggerCfgDir + "/zap-logger-config"
 )
 
 // NopLogger is used to throw away logs when we don't actually want to log in
@@ -46,7 +54,7 @@ func DefaultZapConfig(ctx context.Context, component string) zap.Config {
 	return zap.Config{
 		Level:             logLevel,
 		Development:       false,
-		DisableCaller:     options.FromContext(ctx).LogLevel != "debug",
+		DisableCaller:     true,
 		DisableStacktrace: true,
 		Sampling: &zap.SamplingConfig{
 			Initial:    100,
@@ -67,14 +75,18 @@ func DefaultZapConfig(ctx context.Context, component string) zap.Config {
 			EncodeDuration: zapcore.StringDurationEncoder,
 			EncodeCaller:   zapcore.ShortCallerEncoder,
 		},
-		OutputPaths:      strings.Split(options.FromContext(ctx).LogOutputPaths, ","),
-		ErrorOutputPaths: strings.Split(options.FromContext(ctx).LogErrorOutputPaths, ","),
+		OutputPaths:      []string{"stdout"},
+		ErrorOutputPaths: []string{"stderr"},
 	}
 }
 
 // NewLogger returns a configured *zap.SugaredLogger
 func NewLogger(ctx context.Context, component string) *zap.Logger {
-	return WithCommit(lo.Must(DefaultZapConfig(ctx, component).Build())).Named(component)
+	if logger := loggerFromFile(ctx, component); logger != nil {
+		logger.Debug(fmt.Sprintf("loaded log configuration from file %q", loggerCfgFilePath))
+		return logger
+	}
+	return defaultLogger(ctx, component)
 }
 
 func WithCommit(logger *zap.Logger) *zap.Logger {
@@ -85,6 +97,31 @@ func WithCommit(logger *zap.Logger) *zap.Logger {
 	}
 	// Enrich logs with the components git revision.
 	return logger.With(zap.String(logkey.Commit, revision))
+}
+
+func defaultLogger(ctx context.Context, component string) *zap.Logger {
+	return WithCommit(lo.Must(DefaultZapConfig(ctx, component).Build())).Named(component)
+}
+
+func loggerFromFile(ctx context.Context, component string) *zap.Logger {
+	raw, err := os.ReadFile(loggerCfgFilePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		log.Fatalf("retrieving logging configuration file from %q", loggerCfgFilePath)
+	}
+	cfg := DefaultZapConfig(ctx, component)
+	lo.Must0(json.Unmarshal(raw, &cfg))
+
+	raw, err = os.ReadFile(loggerCfgDir + fmt.Sprintf("/loglevel.%s", component))
+	if err != nil && !os.IsNotExist(err) {
+		log.Fatalf("retrieving logging controller log level file from %q", loggerCfgDir+fmt.Sprintf("/loglevel.%s", component))
+	}
+	if raw != nil {
+		cfg.Level = lo.Must(zap.ParseAtomicLevel(string(raw)))
+	}
+	return WithCommit(lo.Must(cfg.Build())).Named(component)
 }
 
 type ignoreDebugEventsSink struct {

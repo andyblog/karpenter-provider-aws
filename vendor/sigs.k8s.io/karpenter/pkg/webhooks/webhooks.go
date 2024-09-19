@@ -18,13 +18,14 @@ package webhooks
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
-	"github.com/awslabs/operatorpkg/object"
 	"github.com/samber/lo"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -38,7 +39,11 @@ import (
 	"knative.dev/pkg/metrics"
 	"knative.dev/pkg/webhook"
 	"knative.dev/pkg/webhook/certificates"
+	"knative.dev/pkg/webhook/configmaps"
+	"knative.dev/pkg/webhook/resourcesemantics"
 	"knative.dev/pkg/webhook/resourcesemantics/conversion"
+	"knative.dev/pkg/webhook/resourcesemantics/validation"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 
 	v1 "sigs.k8s.io/karpenter/pkg/apis/v1"
@@ -51,9 +56,8 @@ import (
 const component = "webhook"
 
 var (
-	// TODO: Remove conversion webhooks once support for the v1beta1 APIs is dropped
 	ConversionResource = map[schema.GroupKind]conversion.GroupKindConversion{
-		object.GVK(&v1beta1.NodePool{}).GroupKind(): {
+		v1beta1.SchemeGroupVersion.WithKind("NodePool").GroupKind(): {
 			DefinitionName: "nodepools.karpenter.sh",
 			HubVersion:     "v1",
 			Zygotes: map[string]conversion.ConvertibleObject{
@@ -61,7 +65,7 @@ var (
 				"v1beta1": &v1beta1.NodePool{},
 			},
 		},
-		object.GVK(&v1beta1.NodeClaim{}).GroupKind(): {
+		v1beta1.SchemeGroupVersion.WithKind("NodeClaim").GroupKind(): {
 			DefinitionName: "nodeclaims.karpenter.sh",
 			HubVersion:     "v1",
 			Zygotes: map[string]conversion.ConvertibleObject{
@@ -72,9 +76,18 @@ var (
 	}
 )
 
+var (
+	Resources = map[schema.GroupVersionKind]resourcesemantics.GenericCRD{
+		v1beta1.SchemeGroupVersion.WithKind("NodePool"):  &v1beta1.NodePool{},
+		v1beta1.SchemeGroupVersion.WithKind("NodeClaim"): &v1beta1.NodeClaim{},
+	}
+)
+
 func NewWebhooks() []knativeinjection.ControllerConstructor {
 	return []knativeinjection.ControllerConstructor{
 		certificates.NewController,
+		NewCRDValidationWebhook,
+		NewConfigValidationWebhook,
 		NewCRDConversionWebhook,
 	}
 }
@@ -88,6 +101,26 @@ func NewCRDConversionWebhook(ctx context.Context, _ configmap.Watcher) *controll
 		ConversionResource,
 		func(ctx context.Context) context.Context {
 			return injection.WithClient(injection.WithNodeClasses(ctx, nodeclassCtx), client)
+		},
+	)
+}
+
+func NewCRDValidationWebhook(ctx context.Context, _ configmap.Watcher) *controller.Impl {
+	return validation.NewAdmissionController(ctx,
+		"validation.webhook.karpenter.sh",
+		"/validate/karpenter.sh",
+		Resources,
+		func(ctx context.Context) context.Context { return ctx },
+		true,
+	)
+}
+
+func NewConfigValidationWebhook(ctx context.Context, _ configmap.Watcher) *controller.Impl {
+	return configmaps.NewAdmissionController(ctx,
+		"validation.webhook.config.karpenter.sh",
+		"/validate/config.karpenter.sh",
+		configmap.Constructors{
+			knativelogging.ConfigMapName(): knativelogging.NewConfigFromConfigMap,
 		},
 	)
 }
@@ -157,10 +190,16 @@ func Start(ctx context.Context, cfg *rest.Config, ctors ...knativeinjection.Cont
 }
 
 func HealthProbe(ctx context.Context) healthz.Checker {
+	// Create new transport that doesn't validate the TLS certificate
+	// This transport is just polling so validating the server certificate isn't necessary
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} // nolint:gosec
+	client := &http.Client{Transport: transport}
+
 	// TODO: Add knative health check port for webhooks when health port can be configured
 	// Issue: https://github.com/knative/pkg/issues/2765
 	return func(req *http.Request) (err error) {
-		res, err := http.Get(fmt.Sprintf("http://localhost:%d", options.FromContext(ctx).WebhookPort))
+		res, err := client.Get(fmt.Sprintf("https://localhost:%d", options.FromContext(ctx).WebhookPort))
 		// If the webhook connection errors out, liveness/readiness should fail
 		if err != nil {
 			return err
@@ -176,5 +215,24 @@ func HealthProbe(ctx context.Context) healthz.Checker {
 			return fmt.Errorf("webhook probe failed with status code %d", res.StatusCode)
 		}
 		return nil
+	}
+}
+
+func ValidateConversionEnabled(ctx context.Context, kubeclient client.Client) {
+	// allow context to exist longer than cache sync timeout which has a default of 120 seconds
+	listCtx, cancel := context.WithTimeout(ctx, 130*time.Second)
+	defer cancel()
+	var err error
+	v1np := &v1.NodePoolList{}
+	for {
+		err = kubeclient.List(listCtx, v1np, &client.ListOptions{Limit: 1})
+		if err == nil {
+			return
+		}
+		select {
+		case <-listCtx.Done():
+			panic("Conversion webhook enabled but unable to complete call: " + err.Error())
+		case <-time.After(10 * time.Second):
+		}
 	}
 }

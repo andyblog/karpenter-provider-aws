@@ -1,7 +1,7 @@
 ---
 title: "Disruption"
 linkTitle: "Disruption"
-weight: 50
+weight: 4
 description: >
   Understand different ways Karpenter disrupts nodes
 ---
@@ -13,7 +13,7 @@ The finalizer blocks deletion of the node object while the Termination Controlle
 
 ### Disruption Controller
 
-Karpenter automatically discovers disruptable nodes and spins up replacements when needed. Karpenter disrupts nodes by executing one [automated method](#automated-methods) at a time, first doing Drift then Consolidation. Each method varies slightly, but they all follow the standard disruption process. Karpenter uses [disruption budgets]({{<ref "#disruption-budgets" >}}) to control the speed at which these disruptions begin.
+Karpenter automatically discovers disruptable nodes and spins up replacements when needed. Karpenter disrupts nodes by executing one [automated method](#automated-methods) at a time, in order of Expiration, Drift, and then Consolidation. Each method varies slightly, but they all follow the standard disruption process. Karpenter uses [disruption budgets]({{<ref "#disruption-budgets" >}}) to control the speed of disruption.
 1. Identify a list of prioritized candidates for the disruption method.
    * If there are [pods that cannot be evicted](#pod-eviction) on the node, Karpenter will ignore the node and try disrupting it later.
    * If there are no disruptable nodes, continue to the next disruption method.
@@ -61,10 +61,11 @@ By adding the finalizer, Karpenter improves the default Kubernetes process of no
 When you run `kubectl delete node` on a node without a finalizer, the node is deleted without triggering the finalization logic. The instance will continue running in EC2, even though there is no longer a node object for it. The kubelet isn’t watching for its own existence, so if a node is deleted, the kubelet doesn’t terminate itself. All the pod objects get deleted by a garbage collection process later, because the pods’ node is gone.
 {{% /alert %}}
 
-## Automated Graceful Methods
+## Automated Methods
 
-Automated graceful methods, can be rate limited through [NodePool Disruption Budgets]({{<ref "#disruption-budgets" >}})
+Automated methods can be rate limited through [NodePool Disruption Budgets]({{<ref "#disruption-budgets" >}})
 
+* **Expiration**: Karpenter will mark nodes as expired and disrupt them after they have lived a set number of seconds, based on the NodePool's `spec.disruption.expireAfter` value. You can use node expiry to periodically recycle nodes due to security concerns.
 * [**Consolidation**]({{<ref "#consolidation" >}}): Karpenter works to actively reduce cluster cost by identifying when:
   * Nodes can be removed because the node is empty
   * Nodes can be removed as their workloads will run on other nodes in the cluster.
@@ -73,21 +74,21 @@ Automated graceful methods, can be rate limited through [NodePool Disruption Bud
 * [**Interruption**]({{<ref "#interruption" >}}): Karpenter will watch for upcoming interruption events that could affect your nodes (health events, spot interruption, etc.) and will taint, drain, and terminate the node(s) ahead of the event to reduce workload disruption.
 
 {{% alert title="Defaults" color="secondary" %}}
-Disruption is configured through the NodePool's disruption block by the `consolidationPolicy`, and `consolidateAfter` fields. `expireAfter` can also be used to control disruption. Karpenter will configure these fields with the following values by default if they are not set:
+Disruption is configured through the NodePool's disruption block by the `consolidationPolicy`, `expireAfter` and `consolidateAfter` fields. Karpenter will configure these fields with the following values by default if they are not set:
 
 ```yaml
 spec:
   disruption:
-    consolidationPolicy: WhenEmptyOrUnderutilized
-  template:
-    spec:
-      expireAfter: 720h
+    consolidationPolicy: WhenUnderutilized
+    expireAfter: 720h
 ```
 {{% /alert %}}
 
-### Consolidation
+{{% alert title="Warning" color="warning" %}}
+`consolidateAfter` **cannot** be set if `consolidationPolicy` is set to `WhenUnderutilized`. See [kubernetes-sigs/karpenter#735](https://github.com/kubernetes-sigs/karpenter/issues/735) for more information.
+{{% /alert %}}
 
-Consolidation is configured by `consolidationPolicy` and `consolidateAfter`. `consolidationPolicy` determines the pre-conditions for nodes to be considered consolidatable, and are `whenEmpty` or `whenEmptyOrUnderutilized`. If a node has no running non-daemon pods, it is considered empty.  `consolidateAfter` can be set to indicate how long Karpenter should wait after a pod schedules or is removed from the node before considering the node consolidatable. With `whenEmptyOrUnderutilized`, Karpenter will consider a node consolidatable when its `consolidateAfter` has been reached, empty or not.
+### Consolidation
 
 Karpenter has two mechanisms for cluster consolidation:
 1. **Deletion** - A node is eligible for deletion if all of its pods can run on free capacity of other nodes in the cluster.
@@ -168,13 +169,6 @@ Karpenter will add the `Drifted` status condition on NodeClaims if the NodeClaim
 1. The `Drift` feature gate is not enabled but the NodeClaim is drifted, Karpenter will remove the status condition.
 2. The NodeClaim isn't drifted, but has the status condition, Karpenter will remove it.
 
-## Automated Forceful Methods
-
-Automated forceful methods will begin draining nodes as soon as the condition is met. Note that these methods blow past NodePool Disruption Budgets, and do not wait for a pre-spin replacement node to be healthy for the pods to reschedule, unlike the graceful methods mentioned above. Use Pod Disruption Budgets and `do-not-disrupt` on your nodes to rate-limit the speed at which your applications are disrupted.
-
-### Expiration
-Karpenter will disrupt nodes as soon as they're expired after they've lived for the duration of the NodePool's `spec.template.spec.expireAfter`. You can use expiration to periodically recycle nodes due to security concern. 
-
 ### Interruption
 
 If interruption-handling is enabled, Karpenter will watch for upcoming involuntary interruption events that would cause disruption to your workloads. These interruption events include:
@@ -200,20 +194,9 @@ To enable interruption handling, configure the `--interruption-queue` CLI argume
 
 ## Controls
 
-### TerminationGracePeriod 
+### Disruption Budgets
 
-This is the duration of time that a node can be draining before it's forcibly deleted. A node begins draining when it's deleted. Pods will be deleted preemptively based on its TerminationGracePeriodSeconds before this terminationGracePeriod ends to give as much time to cleanup as possible. Note that if your pod's terminationGracePeriodSeconds is larger than this terminationGracePeriod, Karpenter may forcibly delete the pod before it has its full terminationGracePeriod to cleanup. 
-
-This is especially useful in combination with `nodepool.spec.template.spec.expireAfter` to define an absolute maximum on the lifetime of a node, where a node is deleted at `expireAfter` and finishes draining within the `terminationGracePeriod` thereafter. Pods blocking eviction like PDBs and do-not-disrupt will block full draining until the `terminationGracePeriod` is reached. 
-
-For instance, a NodeClaim with `terminationGracePeriod` set to `1h` and an `expireAfter` set to `23h` will begin draining after it's lived for `23h`. Let's say a `do-not-disrupt` pod has `TerminationGracePeriodSeconds` set to `300` seconds. If the node hasn't been fully drained after `55m`, Karpenter will delete the pod to allow it's full `terminationGracePeriodSeconds` to cleanup. If no pods are blocking draining, Karpenter will cleanup the node as soon as the node is fully drained, rather than waiting for the NodeClaim's `terminationGracePeriod` to finish.
-
-### NodePool Disruption Budgets
-
-You can rate limit Karpenter's disruption through the NodePool's `spec.disruption.budgets`. If undefined, Karpenter will default to one budget with `nodes: 10%`. Budgets will consider nodes that are actively being deleted for any reason, and will only block Karpenter from disrupting nodes voluntarily through drift, emptiness, and consolidation. Note that NodePool Disruption Budgets do not prevent Karpenter from cleaning up expired or drifted nodes. 
-
-#### Reasons
-Karpenter allows specifying if a budget applies to any of `Drifted`, `Underutilized`, or `Empty`. When a budget has no reasons, it's assumed that it applies to all reasons. When calculating allowed disruptions for a given reason, Karpenter will take the minimum of the budgets that have listed the reason or have left reasons undefined.
+You can rate limit Karpenter's disruption through the NodePool's `spec.disruption.budgets`. If undefined, Karpenter will default to one budget with `nodes: 10%`. Budgets will consider nodes that are actively being deleted for any reason, and will only block Karpenter from disrupting nodes voluntarily through expiration, drift, emptiness, and consolidation.
 
 #### Nodes
 When calculating if a budget will block nodes from disruption, Karpenter lists the total number of nodes owned by a NodePool, subtracting out the nodes owned by that NodePool that are currently being deleted and nodes that are NotReady. If the number of nodes being deleted by Karpenter or any other processes is greater than the number of allowed disruptions, disruption for this node will not proceed.
@@ -221,32 +204,25 @@ When calculating if a budget will block nodes from disruption, Karpenter lists t
 If the budget is configured with a percentage value, such as `20%`, Karpenter will calculate the number of allowed disruptions as `allowed_disruptions = roundup(total * percentage) - total_deleting - total_notready`. If otherwise defined as a non-percentage value, Karpenter will simply subtract the number of nodes from the total `(total - non_percentage_value) - total_deleting - total_notready`. For multiple budgets in a NodePool, Karpenter will take the minimum value (most restrictive) of each of the budgets.
 
 For example, the following NodePool with three budgets defines the following requirements:
-- The first budget will only allow 20% of nodes owned by that NodePool to be disrupted if it's empty or drifted. For instance, if there were 19 nodes owned by the NodePool, 4 empty or drifted nodes could be disrupted, rounding up from `19 * .2 = 3.8`.
+- The first budget will only allow 20% of nodes owned by that NodePool to be disrupted. For instance, if there were 19 nodes owned by the NodePool, 4 disruptions would be allowed, rounding up from `19 * .2 = 3.8`.
 - The second budget acts as a ceiling to the previous budget, only allowing 5 disruptions when there are more than 25 nodes.
-- The last budget only blocks disruptions during the first 10 minutes of the day, where 0 disruptions are allowed, only applying to underutilized nodes. 
+- The last budget only blocks disruptions during the first 10 minutes of the day, where 0 disruptions are allowed.
 
 ```yaml
-apiVersion: karpenter.sh/v1
+apiVersion: karpenter.sh/v1beta1
 kind: NodePool
 metadata:
   name: default
 spec:
-  template:
-    spec: 
-      expireAfter: 720h # 30 * 24h = 720h
   disruption:
-    consolidationPolicy: WhenEmptyOrUnderutilized
+    consolidationPolicy: WhenUnderutilized
+    expireAfter: 720h # 30 * 24h = 720h
     budgets:
     - nodes: "20%"
-      reasons: 
-      - "empty"
-      - "drifted"
     - nodes: "5"
     - nodes: "0"
       schedule: "@daily"
       duration: 10m
-      reasons: 
-      - "underutilized"
 ```
 
 #### Schedule
@@ -315,15 +291,16 @@ metadata:
 
 #### Example: Disable Disruption on a NodePool
 
-To disable disruption for all nodes launched by a NodePool, you can configure its `.spec.disruption.budgets`. Setting a budget of zero nodes will prevent any of those nodes from being considered for voluntary disruption.
+NodePool `.spec.annotations` allow you to set annotations that will be applied to all nodes launched by this NodePool. By setting the annotation `karpenter.sh/do-not-disrupt: "true"` on the NodePool, you will selectively prevent all nodes launched by this NodePool from being considered in disruption actions.
 
 ```yaml
-apiVersion: karpenter.sh/v1
+apiVersion: karpenter.sh/v1beta1
 kind: NodePool
 metadata:
   name: default
 spec:
-  disruption:
-    budgets:
-      - nodes: "0"
+  template:
+    metadata:
+      annotations: # will be applied to all nodes
+        karpenter.sh/do-not-disrupt: "true"
 ```

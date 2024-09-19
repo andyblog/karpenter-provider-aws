@@ -20,13 +20,13 @@ import (
 	"testing"
 	"time"
 
-	"sigs.k8s.io/karpenter/pkg/test/v1alpha1"
-
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/ec2"
 	awspricing "github.com/aws/aws-sdk-go/service/pricing"
 	"github.com/samber/lo"
+	"k8s.io/apimachinery/pkg/types"
 	coreoptions "sigs.k8s.io/karpenter/pkg/operator/options"
+	"sigs.k8s.io/karpenter/pkg/operator/scheme"
 	coretest "sigs.k8s.io/karpenter/pkg/test"
 
 	"github.com/aws/karpenter-provider-aws/pkg/apis"
@@ -55,7 +55,7 @@ func TestAWS(t *testing.T) {
 }
 
 var _ = BeforeSuite(func() {
-	env = coretest.NewEnvironment(coretest.WithCRDs(apis.CRDs...), coretest.WithCRDs(v1alpha1.CRDs...))
+	env = coretest.NewEnvironment(scheme.Scheme, coretest.WithCRDs(apis.CRDs...))
 	ctx = coreoptions.ToContext(ctx, coretest.Options())
 	ctx = options.ToContext(ctx, test.Options())
 	ctx, stop = context.WithCancel(ctx)
@@ -98,14 +98,14 @@ var _ = Describe("Pricing", func() {
 	)
 	It("should return static on-demand data if pricing API fails", func() {
 		awsEnv.PricingAPI.NextError.Set(fmt.Errorf("failed"))
-		_ = ExpectSingletonReconcileFailed(ctx, controller)
+		ExpectReconcileFailed(ctx, controller, types.NamespacedName{})
 		price, ok := awsEnv.PricingProvider.OnDemandPrice("c5.large")
 		Expect(ok).To(BeTrue())
 		Expect(price).To(BeNumerically(">", 0))
 	})
 	It("should return static spot data if EC2 describeSpotPriceHistory API fails", func() {
 		awsEnv.PricingAPI.NextError.Set(fmt.Errorf("failed"))
-		_ = ExpectSingletonReconcileFailed(ctx, controller)
+		ExpectReconcileFailed(ctx, controller, types.NamespacedName{})
 		price, ok := awsEnv.PricingProvider.SpotPrice("c5.large", "test-zone-1a")
 		Expect(ok).To(BeTrue())
 		Expect(price).To(BeNumerically(">", 0))
@@ -119,7 +119,7 @@ var _ = Describe("Pricing", func() {
 				fake.NewOnDemandPrice("c99.large", 1.23),
 			},
 		})
-		_ = ExpectSingletonReconcileFailed(ctx, controller)
+		ExpectReconcileFailed(ctx, controller, types.NamespacedName{})
 
 		price, ok := awsEnv.PricingProvider.OnDemandPrice("c98.large")
 		Expect(ok).To(BeTrue())
@@ -165,7 +165,7 @@ var _ = Describe("Pricing", func() {
 				fake.NewOnDemandPrice("c99.large", 1.23),
 			},
 		})
-		ExpectSingletonReconciled(ctx, controller)
+		ExpectReconcileSucceeded(ctx, controller, types.NamespacedName{})
 
 		price, ok := awsEnv.PricingProvider.SpotPrice("c98.large", "test-zone-1b")
 		Expect(ok).To(BeTrue())
@@ -199,7 +199,7 @@ var _ = Describe("Pricing", func() {
 				fake.NewOnDemandPrice("c99.large", 1.23),
 			},
 		})
-		ExpectSingletonReconciled(ctx, controller)
+		ExpectReconcileSucceeded(ctx, controller, types.NamespacedName{})
 
 		price, ok := awsEnv.PricingProvider.SpotPrice("c98.large", "test-zone-1a")
 		Expect(ok).To(BeTrue())
@@ -226,7 +226,7 @@ var _ = Describe("Pricing", func() {
 				fake.NewOnDemandPrice("c99.large", 1.23),
 			},
 		})
-		ExpectSingletonReconciled(ctx, controller)
+		ExpectReconcileSucceeded(ctx, controller, types.NamespacedName{})
 
 		_, ok := awsEnv.PricingProvider.SpotPrice("c99.large", "test-zone-1b")
 		Expect(ok).To(BeFalse())
@@ -253,7 +253,7 @@ var _ = Describe("Pricing", func() {
 				fake.NewOnDemandPrice("c99.large", 1.23),
 			},
 		})
-		ExpectSingletonReconciled(ctx, controller)
+		ExpectReconcileSucceeded(ctx, controller, types.NamespacedName{})
 		inp := awsEnv.EC2API.DescribeSpotPriceHistoryInput.Clone()
 		Expect(lo.Map(inp.ProductDescriptions, func(x *string, _ int) string { return *x })).
 			To(ContainElements("Linux/UNIX", "Linux/UNIX (Amazon VPC)"))
@@ -288,7 +288,7 @@ var _ = Describe("Pricing", func() {
 				fake.NewOnDemandPrice("c5.xlarge", 1.23),
 			},
 		})
-		ExpectSingletonReconciled(ctx, controller)
+		ExpectReconcileSucceeded(ctx, controller, types.NamespacedName{})
 		price, ok := awsEnv.PricingProvider.OnDemandPrice("c3.2xlarge")
 		Expect(ok).To(BeTrue())
 		Expect(price).To(BeNumerically("==", 0.420000))
@@ -318,7 +318,7 @@ var _ = Describe("Pricing", func() {
 				fake.NewOnDemandPriceWithCurrency("c99.large", 1.23, "CNY"),
 			},
 		})
-		ExpectSingletonReconciled(ctx, tmpController)
+		ExpectReconcileSucceeded(ctx, tmpController, types.NamespacedName{})
 
 		price, ok := tmpPricingProvider.OnDemandPrice("c98.large")
 		Expect(ok).To(BeTrue())

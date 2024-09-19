@@ -15,13 +15,9 @@ limitations under the License.
 package status_test
 
 import (
-	"fmt"
-
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/iam"
 	"github.com/samber/lo"
-
-	v1 "github.com/aws/karpenter-provider-aws/pkg/apis/v1"
 
 	"github.com/aws/karpenter-provider-aws/pkg/fake"
 	"github.com/aws/karpenter-provider-aws/pkg/operator/options"
@@ -44,15 +40,9 @@ var _ = Describe("NodeClass InstanceProfile Status Controller", func() {
 		Expect(awsEnv.IAMAPI.InstanceProfiles).To(HaveLen(1))
 		Expect(awsEnv.IAMAPI.InstanceProfiles[profileName].Roles).To(HaveLen(1))
 		Expect(*awsEnv.IAMAPI.InstanceProfiles[profileName].Roles[0].RoleName).To(Equal("test-role"))
-		Expect(awsEnv.IAMAPI.InstanceProfiles[profileName].Tags).To(ContainElements(
-			&iam.Tag{Key: lo.ToPtr(fmt.Sprintf("kubernetes.io/cluster/%s", options.FromContext(ctx).ClusterName)), Value: lo.ToPtr("owned")},
-			&iam.Tag{Key: lo.ToPtr(v1.LabelNodeClass), Value: lo.ToPtr(nodeClass.Name)},
-			&iam.Tag{Key: lo.ToPtr(v1.EKSClusterNameTagKey), Value: lo.ToPtr(options.FromContext(ctx).ClusterName)},
-		))
 
 		nodeClass = ExpectExists(ctx, env.Client, nodeClass)
 		Expect(nodeClass.Status.InstanceProfile).To(Equal(profileName))
-		Expect(nodeClass.StatusConditions().IsTrue(v1.ConditionTypeInstanceProfileReady)).To(BeTrue())
 	})
 	It("should add the role to the instance profile when it exists without a role", func() {
 		awsEnv.IAMAPI.InstanceProfiles = map[string]*iam.InstanceProfile{
@@ -72,7 +62,6 @@ var _ = Describe("NodeClass InstanceProfile Status Controller", func() {
 
 		nodeClass = ExpectExists(ctx, env.Client, nodeClass)
 		Expect(nodeClass.Status.InstanceProfile).To(Equal(profileName))
-		Expect(nodeClass.StatusConditions().IsTrue(v1.ConditionTypeInstanceProfileReady)).To(BeTrue())
 	})
 	It("should update the role for the instance profile when the wrong role exists", func() {
 		awsEnv.IAMAPI.InstanceProfiles = map[string]*iam.InstanceProfile{
@@ -97,40 +86,6 @@ var _ = Describe("NodeClass InstanceProfile Status Controller", func() {
 
 		nodeClass = ExpectExists(ctx, env.Client, nodeClass)
 		Expect(nodeClass.Status.InstanceProfile).To(Equal(profileName))
-		Expect(nodeClass.StatusConditions().IsTrue(v1.ConditionTypeInstanceProfileReady)).To(BeTrue())
-	})
-	It("should add the eks:eks-cluster-name tag when the tag doesn't exist", func() {
-		awsEnv.IAMAPI.InstanceProfiles = map[string]*iam.InstanceProfile{
-			profileName: {
-				InstanceProfileId:   aws.String(fake.InstanceProfileID()),
-				InstanceProfileName: aws.String(profileName),
-				Roles: []*iam.Role{
-					{
-						RoleName: aws.String("other-role"),
-					},
-				},
-				Tags: []*iam.Tag{
-					{
-						Key:   lo.ToPtr(fmt.Sprintf("kubernetes.io/cluster/%s", options.FromContext(ctx).ClusterName)),
-						Value: lo.ToPtr("owned"),
-					},
-					{
-						Key:   lo.ToPtr(v1.LabelNodeClass),
-						Value: lo.ToPtr(nodeClass.Name),
-					},
-				},
-			},
-		}
-
-		ExpectApplied(ctx, env.Client, nodeClass)
-		ExpectObjectReconciled(ctx, env.Client, statusController, nodeClass)
-
-		Expect(awsEnv.IAMAPI.InstanceProfiles).To(HaveLen(1))
-		Expect(awsEnv.IAMAPI.InstanceProfiles[profileName].Tags).To(ContainElements(
-			&iam.Tag{Key: lo.ToPtr(fmt.Sprintf("kubernetes.io/cluster/%s", options.FromContext(ctx).ClusterName)), Value: lo.ToPtr("owned")},
-			&iam.Tag{Key: lo.ToPtr(v1.LabelNodeClass), Value: lo.ToPtr(nodeClass.Name)},
-			&iam.Tag{Key: lo.ToPtr(v1.EKSClusterNameTagKey), Value: lo.ToPtr(options.FromContext(ctx).ClusterName)},
-		))
 	})
 	It("should not call CreateInstanceProfile or AddRoleToInstanceProfile when instance profile exists with correct role", func() {
 		awsEnv.IAMAPI.InstanceProfiles = map[string]*iam.InstanceProfile{
@@ -155,8 +110,6 @@ var _ = Describe("NodeClass InstanceProfile Status Controller", func() {
 
 		Expect(awsEnv.IAMAPI.CreateInstanceProfileBehavior.Calls()).To(BeZero())
 		Expect(awsEnv.IAMAPI.AddRoleToInstanceProfileBehavior.Calls()).To(BeZero())
-		nodeClass = ExpectExists(ctx, env.Client, nodeClass)
-		Expect(nodeClass.StatusConditions().IsTrue(v1.ConditionTypeInstanceProfileReady)).To(BeTrue())
 	})
 	It("should resolve the specified instance profile into the status when using instanceProfile field", func() {
 		nodeClass.Spec.Role = ""
@@ -166,7 +119,6 @@ var _ = Describe("NodeClass InstanceProfile Status Controller", func() {
 
 		nodeClass = ExpectExists(ctx, env.Client, nodeClass)
 		Expect(nodeClass.Status.InstanceProfile).To(Equal(lo.FromPtr(nodeClass.Spec.InstanceProfile)))
-		Expect(nodeClass.StatusConditions().IsTrue(v1.ConditionTypeInstanceProfileReady)).To(BeTrue())
 	})
 	It("should not call the the IAM API when specifying an instance profile", func() {
 		nodeClass.Spec.Role = ""
@@ -176,7 +128,5 @@ var _ = Describe("NodeClass InstanceProfile Status Controller", func() {
 
 		Expect(awsEnv.IAMAPI.CreateInstanceProfileBehavior.Calls()).To(BeZero())
 		Expect(awsEnv.IAMAPI.AddRoleToInstanceProfileBehavior.Calls()).To(BeZero())
-		nodeClass = ExpectExists(ctx, env.Client, nodeClass)
-		Expect(nodeClass.StatusConditions().IsTrue(v1.ConditionTypeInstanceProfileReady)).To(BeTrue())
 	})
 })

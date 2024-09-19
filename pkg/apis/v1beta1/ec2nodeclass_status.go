@@ -16,14 +16,7 @@ package v1beta1
 
 import (
 	"github.com/awslabs/operatorpkg/status"
-	corev1 "k8s.io/api/core/v1"
-)
-
-const (
-	ConditionTypeSubnetsReady         = "SubnetsReady"
-	ConditionTypeSecurityGroupsReady  = "SecurityGroupsReady"
-	ConditionTypeAMIsReady            = "AMIsReady"
-	ConditionTypeInstanceProfileReady = "InstanceProfileReady"
+	v1 "k8s.io/api/core/v1"
 )
 
 // Subnet contains resolved Subnet selector values utilized for node launch
@@ -59,7 +52,7 @@ type AMI struct {
 	Name string `json:"name,omitempty"`
 	// Requirements of the AMI to be utilized on an instance type
 	// +required
-	Requirements []corev1.NodeSelectorRequirement `json:"requirements"`
+	Requirements []v1.NodeSelectorRequirement `json:"requirements"`
 }
 
 // EC2NodeClassStatus contains the resolved state of the EC2NodeClass
@@ -85,12 +78,7 @@ type EC2NodeClassStatus struct {
 }
 
 func (in *EC2NodeClass) StatusConditions() status.ConditionSet {
-	return status.NewReadyConditions(
-		ConditionTypeAMIsReady,
-		ConditionTypeSubnetsReady,
-		ConditionTypeSecurityGroupsReady,
-		ConditionTypeInstanceProfileReady,
-	).For(in)
+	return status.NewReadyConditions().For(in)
 }
 
 func (in *EC2NodeClass) GetConditions() []status.Condition {

@@ -213,7 +213,7 @@ Resources:
             {
               "Sid": "AllowScopedInstanceProfileCreationActions",
               "Effect": "Allow",
-              "Resource": "arn:${AWS::Partition}:iam::${AWS::AccountId}:instance-profile/*",
+              "Resource": "*",
               "Action": [
                 "iam:CreateInstanceProfile"
               ],
@@ -230,7 +230,7 @@ Resources:
             {
               "Sid": "AllowScopedInstanceProfileTagActions",
               "Effect": "Allow",
-              "Resource": "arn:${AWS::Partition}:iam::${AWS::AccountId}:instance-profile/*",
+              "Resource": "*",
               "Action": [
                 "iam:TagInstanceProfile"
               ],
@@ -250,7 +250,7 @@ Resources:
             {
               "Sid": "AllowScopedInstanceProfileActions",
               "Effect": "Allow",
-              "Resource": "arn:${AWS::Partition}:iam::${AWS::AccountId}:instance-profile/*",
+              "Resource": "*",
               "Action": [
                 "iam:AddRoleToInstanceProfile",
                 "iam:RemoveRoleFromInstanceProfile",
@@ -269,7 +269,7 @@ Resources:
             {
               "Sid": "AllowInstanceProfileReadActions",
               "Effect": "Allow",
-              "Resource": "arn:${AWS::Partition}:iam::${AWS::AccountId}:instance-profile/*",
+              "Resource": "*",
               "Action": "iam:GetInstanceProfile"
             },
             {
@@ -301,14 +301,6 @@ Resources:
                 - sqs.amazonaws.com
             Action: sqs:SendMessage
             Resource: !GetAtt KarpenterInterruptionQueue.Arn
-          - Sid: DenyHTTP
-            Effect: Deny
-            Action: sqs:*
-            Resource: !GetAtt KarpenterInterruptionQueue.Arn
-            Condition:
-              Bool:
-                aws:SecureTransport: false
-            Principal: "*"
   ScheduledChangeRule:
     Type: 'AWS::Events::Rule'
     Properties:

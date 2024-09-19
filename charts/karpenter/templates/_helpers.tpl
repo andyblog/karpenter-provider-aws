@@ -75,17 +75,6 @@ Karpenter image to use
 {{- end }}
 {{- end }}
 
-{{/*
-Karpenter post-install hook image to use
-*/}}
-{{- define "karpenter.postInstallHook.image" -}}
-{{- if .Values.postInstallHook.image.digest }}
-{{- printf "%s:%s@%s" .Values.postInstallHook.image.repository  (default (printf "v%s" .Chart.AppVersion) .Values.postInstallHook.image.tag) .Values.postInstallHook.image.digest }}
-{{- else }}
-{{- printf "%s:%s" .Values.postInstallHook.image.repository  (default (printf "v%s" .Chart.AppVersion) .Values.postInstallHook.image.tag) }}
-{{- end }}
-{{- end }}
-
 
 {{/* Get PodDisruptionBudget API Version */}}
 {{- define "karpenter.pdb.apiVersion" -}}
@@ -157,7 +146,7 @@ Flatten the stdout logging outputs from args provided
 */}}
 {{- define "karpenter.outputPathsList" -}}
 {{ $paths := list -}}
-{{- range .Values.logOutputPaths -}}
+{{- range .Values.logConfig.outputPaths -}}
     {{- if not (has (printf "%s" . | quote) $paths) -}}
         {{- $paths = printf "%s" . | quote  | append $paths -}}
     {{- end -}}
@@ -170,7 +159,7 @@ Flatten the stderr logging outputs from args provided
 */}}
 {{- define "karpenter.errorOutputPathsList" -}}
 {{ $paths := list -}}
-{{- range .Values.logErrorOutputPaths -}}
+{{- range .Values.logConfig.errorOutputPaths -}}
     {{- if not (has (printf "%s" . | quote) $paths) -}}
         {{- $paths = printf "%s" . | quote  | append $paths -}}
     {{- end -}}

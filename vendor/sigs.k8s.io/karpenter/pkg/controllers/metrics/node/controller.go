@@ -21,22 +21,19 @@ import (
 	"strings"
 	"time"
 
-	"github.com/awslabs/operatorpkg/singleton"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/samber/lo"
-	corev1 "k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
-	controllerruntime "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	crmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	"sigs.k8s.io/karpenter/pkg/operator/injection"
-
-	v1 "sigs.k8s.io/karpenter/pkg/apis/v1"
+	"sigs.k8s.io/karpenter/pkg/apis/v1beta1"
 	"sigs.k8s.io/karpenter/pkg/controllers/state"
 	"sigs.k8s.io/karpenter/pkg/metrics"
+	"sigs.k8s.io/karpenter/pkg/operator/controller"
 	"sigs.k8s.io/karpenter/pkg/utils/resources"
 )
 
@@ -47,7 +44,7 @@ const (
 )
 
 var (
-	allocatable = prometheus.NewGaugeVec(
+	allocatableGaugeVec = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Namespace: "karpenter",
 			Subsystem: "nodes",
@@ -56,25 +53,25 @@ var (
 		},
 		nodeLabelNames(),
 	)
-	totalPodRequests = prometheus.NewGaugeVec(
+	podRequestsGaugeVec = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Namespace: "karpenter",
 			Subsystem: "nodes",
 			Name:      "total_pod_requests",
-			Help:      "Node total pod requests are the resources requested by pods bound to nodes, including the DaemonSet pods.",
+			Help:      "Node total pod requests are the resources requested by non-DaemonSet pods bound to nodes.",
 		},
 		nodeLabelNames(),
 	)
-	totalPodLimits = prometheus.NewGaugeVec(
+	podLimitsGaugeVec = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Namespace: "karpenter",
 			Subsystem: "nodes",
 			Name:      "total_pod_limits",
-			Help:      "Node total pod limits are the resources specified by pod limits, including the DaemonSet pods.",
+			Help:      "Node total pod limits are the resources specified by non-DaemonSet pod limits.",
 		},
 		nodeLabelNames(),
 	)
-	totalDaemonRequests = prometheus.NewGaugeVec(
+	daemonRequestsGaugeVec = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Namespace: "karpenter",
 			Subsystem: "nodes",
@@ -83,7 +80,7 @@ var (
 		},
 		nodeLabelNames(),
 	)
-	totalDaemonLimits = prometheus.NewGaugeVec(
+	daemonLimitsGaugeVec = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Namespace: "karpenter",
 			Subsystem: "nodes",
@@ -92,7 +89,7 @@ var (
 		},
 		nodeLabelNames(),
 	)
-	systemOverhead = prometheus.NewGaugeVec(
+	overheadGaugeVec = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Namespace: "karpenter",
 			Subsystem: "nodes",
@@ -117,12 +114,12 @@ func nodeLabelNames() []string {
 
 func init() {
 	crmetrics.Registry.MustRegister(
-		allocatable,
-		totalPodRequests,
-		totalPodLimits,
-		totalDaemonRequests,
-		totalDaemonLimits,
-		systemOverhead,
+		allocatableGaugeVec,
+		podRequestsGaugeVec,
+		podLimitsGaugeVec,
+		daemonRequestsGaugeVec,
+		daemonLimitsGaugeVec,
+		overheadGaugeVec,
 	)
 }
 
@@ -138,9 +135,7 @@ func NewController(cluster *state.Cluster) *Controller {
 	}
 }
 
-func (c *Controller) Reconcile(ctx context.Context) (reconcile.Result, error) {
-	ctx = injection.WithControllerName(ctx, "metrics.node") //nolint:ineffassign,staticcheck
-
+func (c *Controller) Reconcile(_ context.Context, _ reconcile.Request) (reconcile.Result, error) {
 	nodes := lo.Reject(c.cluster.Nodes(), func(n *state.StateNode, _ int) bool {
 		return n.Node == nil
 	})
@@ -150,26 +145,25 @@ func (c *Controller) Reconcile(ctx context.Context) (reconcile.Result, error) {
 	return reconcile.Result{RequeueAfter: time.Second * 5}, nil
 }
 
-func (c *Controller) Register(_ context.Context, m manager.Manager) error {
-	return controllerruntime.NewControllerManagedBy(m).
+func (c *Controller) Register(_ context.Context, mgr manager.Manager) error {
+	return controller.NewSingletonManagedBy(mgr).
 		Named("metrics.node").
-		WatchesRawSource(singleton.Source()).
-		Complete(singleton.AsReconciler(c))
+		Complete(c)
 }
 
 func buildMetrics(n *state.StateNode) (res []*metrics.StoreMetric) {
-	for gaugeVec, resourceList := range map[*prometheus.GaugeVec]corev1.ResourceList{
-		systemOverhead:      resources.Subtract(n.Node.Status.Capacity, n.Node.Status.Allocatable),
-		totalPodRequests:    n.PodRequests(),
-		totalPodLimits:      n.PodLimits(),
-		totalDaemonRequests: n.DaemonSetRequests(),
-		totalDaemonLimits:   n.DaemonSetLimits(),
-		allocatable:         n.Node.Status.Allocatable,
+	for gaugeVec, resourceList := range map[*prometheus.GaugeVec]v1.ResourceList{
+		overheadGaugeVec:       resources.Subtract(n.Node.Status.Capacity, n.Node.Status.Allocatable),
+		podRequestsGaugeVec:    resources.Subtract(n.PodRequests(), n.DaemonSetRequests()),
+		podLimitsGaugeVec:      resources.Subtract(n.PodLimits(), n.DaemonSetLimits()),
+		daemonRequestsGaugeVec: n.DaemonSetRequests(),
+		daemonLimitsGaugeVec:   n.DaemonSetLimits(),
+		allocatableGaugeVec:    n.Node.Status.Allocatable,
 	} {
 		for resourceName, quantity := range resourceList {
 			res = append(res, &metrics.StoreMetric{
 				GaugeVec: gaugeVec,
-				Value:    lo.Ternary(resourceName == corev1.ResourceCPU, float64(quantity.MilliValue())/float64(1000), float64(quantity.Value())),
+				Value:    lo.Ternary(resourceName == v1.ResourceCPU, float64(quantity.MilliValue())/float64(1000), float64(quantity.Value())),
 				Labels:   getNodeLabels(n.Node, strings.ReplaceAll(strings.ToLower(string(resourceName)), "-", "_")),
 			})
 		}
@@ -177,7 +171,7 @@ func buildMetrics(n *state.StateNode) (res []*metrics.StoreMetric) {
 	return res
 }
 
-func getNodeLabels(node *corev1.Node, resourceTypeName string) prometheus.Labels {
+func getNodeLabels(node *v1.Node, resourceTypeName string) prometheus.Labels {
 	metricLabels := prometheus.Labels{}
 	metricLabels[resourceType] = resourceTypeName
 	metricLabels[nodeName] = node.Name
@@ -192,7 +186,7 @@ func getNodeLabels(node *corev1.Node, resourceTypeName string) prometheus.Labels
 
 func getWellKnownLabels() map[string]string {
 	labels := make(map[string]string)
-	for wellKnownLabel := range v1.WellKnownLabels {
+	for wellKnownLabel := range v1beta1.WellKnownLabels {
 		if parts := strings.Split(wellKnownLabel, "/"); len(parts) == 2 {
 			label := parts[1]
 			// Reformat label names to be consistent with Prometheus naming conventions (snake_case)

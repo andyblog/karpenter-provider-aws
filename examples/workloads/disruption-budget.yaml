@@ -22,10 +22,6 @@ spec:
       labels:
         app: pdb
     spec:
-      securityContext:
-        runAsUser: 2000
-        runAsGroup: 3000
-        fsGroup: 2000
       containers:
       - image: public.ecr.aws/eks-distro/kubernetes/pause:3.2
         name: pdb
@@ -33,7 +29,5 @@ spec:
           requests:
             cpu: "1"
             memory: 256M
-        securityContext:
-          allowPrivilegedEscalation: false
       nodeSelector:
         kubernetes.io/arch: amd64

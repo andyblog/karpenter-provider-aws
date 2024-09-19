@@ -38,7 +38,6 @@ func (in *NodePool) ConvertTo(ctx context.Context, to apis.Convertible) error {
 
 	// Convert v1 status
 	v1beta1NP.Status.Resources = in.Status.Resources
-	v1beta1NP.Status.Conditions = in.Status.Conditions
 	if err := in.Spec.convertTo(&v1beta1NP.Spec, in.Annotations[KubeletCompatibilityAnnotationKey], in.Annotations[NodeClassReferenceAnnotationKey]); err != nil {
 		return err
 	}
@@ -61,7 +60,7 @@ func (in *NodePoolSpec) convertTo(v1beta1np *v1beta1.NodePoolSpec, kubeletAnnota
 func (in *Disruption) convertTo(v1beta1np *v1beta1.Disruption) {
 	v1beta1np.ConsolidationPolicy = lo.Ternary(in.ConsolidationPolicy == ConsolidationPolicyWhenEmptyOrUnderutilized,
 		v1beta1.ConsolidationPolicyWhenUnderutilized, v1beta1.ConsolidationPolicy(in.ConsolidationPolicy))
-	// If the v1 nodepool is WhenUnderutilized, the v1beta1 nodepool should have an unset consolidateAfter
+	// If the v1 nodepool is WhenEmptyOrUnderutilized, the v1beta1 nodepool should have an unset consolidateAfter
 	v1beta1np.ConsolidateAfter = lo.Ternary(in.ConsolidationPolicy == ConsolidationPolicyWhenEmptyOrUnderutilized,
 		nil, (*v1beta1.NillableDuration)(lo.ToPtr(in.ConsolidateAfter)))
 	v1beta1np.Budgets = lo.Map(in.Budgets, func(v1budget Budget, _ int) v1beta1.Budget {
@@ -116,7 +115,6 @@ func (in *NodePool) ConvertFrom(ctx context.Context, v1beta1np apis.Convertible)
 
 	// Convert v1beta1 status
 	in.Status.Resources = v1beta1NP.Status.Resources
-	in.Status.Conditions = v1beta1NP.Status.Conditions
 
 	kubeletAnnotation, err := in.Spec.convertFrom(ctx, &v1beta1NP.Spec)
 	if err != nil {

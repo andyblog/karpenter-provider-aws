@@ -15,8 +15,6 @@ limitations under the License.
 package statechange
 
 import (
-	"github.com/samber/lo"
-
 	"github.com/aws/karpenter-provider-aws/pkg/controllers/interruption/messages"
 )
 
@@ -37,9 +35,6 @@ func (m Message) EC2InstanceIDs() []string {
 	return []string{m.Detail.InstanceID}
 }
 
-func (m Message) Kind() messages.Kind {
-	if lo.Contains([]string{"stopping", "stopped"}, m.Detail.State) {
-		return messages.InstanceStoppedKind
-	}
-	return messages.InstanceTerminatedKind
+func (Message) Kind() messages.Kind {
+	return messages.StateChangeKind
 }

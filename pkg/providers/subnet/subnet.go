@@ -26,12 +26,12 @@ import (
 	"github.com/mitchellh/hashstructure/v2"
 	"github.com/patrickmn/go-cache"
 	"github.com/samber/lo"
-	corev1 "k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	v1 "github.com/aws/karpenter-provider-aws/pkg/apis/v1"
+	"github.com/aws/karpenter-provider-aws/pkg/apis/v1beta1"
 
-	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
+	corev1beta1 "sigs.k8s.io/karpenter/pkg/apis/v1beta1"
 	"sigs.k8s.io/karpenter/pkg/cloudprovider"
 	"sigs.k8s.io/karpenter/pkg/scheduling"
 	"sigs.k8s.io/karpenter/pkg/utils/pretty"
@@ -39,8 +39,9 @@ import (
 
 type Provider interface {
 	LivenessProbe(*http.Request) error
-	List(context.Context, *v1.EC2NodeClass) ([]*ec2.Subnet, error)
-	ZonalSubnetsForLaunch(context.Context, *v1.EC2NodeClass, []*cloudprovider.InstanceType, string) (map[string]*Subnet, error)
+	List(context.Context, *v1beta1.EC2NodeClass) ([]*ec2.Subnet, error)
+	AssociatePublicIPAddressValue(*v1beta1.EC2NodeClass) *bool
+	ZonalSubnetsForLaunch(context.Context, *v1beta1.EC2NodeClass, []*cloudprovider.InstanceType, string) (map[string]*Subnet, error)
 	UpdateInflightIPs(*ec2.CreateFleetInput, *ec2.CreateFleetOutput, []*cloudprovider.InstanceType, []*Subnet, string)
 }
 
@@ -75,7 +76,7 @@ func NewDefaultProvider(ec2api ec2iface.EC2API, cache *cache.Cache, availableIPA
 	}
 }
 
-func (p *DefaultProvider) List(ctx context.Context, nodeClass *v1.EC2NodeClass) ([]*ec2.Subnet, error) {
+func (p *DefaultProvider) List(ctx context.Context, nodeClass *v1beta1.EC2NodeClass) ([]*ec2.Subnet, error) {
 	p.Lock()
 	defer p.Unlock()
 	filterSets := getFilterSets(nodeClass.Spec.SubnetSelectorTerms)
@@ -109,10 +110,10 @@ func (p *DefaultProvider) List(ctx context.Context, nodeClass *v1.EC2NodeClass) 
 		}
 	}
 	p.cache.SetDefault(fmt.Sprint(hash), lo.Values(subnets))
-	if p.cm.HasChanged(fmt.Sprintf("subnets/%s", nodeClass.Name), lo.Keys(subnets)) {
+	if p.cm.HasChanged(fmt.Sprintf("subnets/%s", nodeClass.Name), subnets) {
 		log.FromContext(ctx).
-			WithValues("subnets", lo.Map(lo.Values(subnets), func(s *ec2.Subnet, _ int) v1.Subnet {
-				return v1.Subnet{
+			WithValues("subnets", lo.Map(lo.Values(subnets), func(s *ec2.Subnet, _ int) v1beta1.Subnet {
+				return v1beta1.Subnet{
 					ID:     lo.FromPtr(s.SubnetId),
 					Zone:   lo.FromPtr(s.AvailabilityZone),
 					ZoneID: lo.FromPtr(s.AvailabilityZoneId),
@@ -122,8 +123,21 @@ func (p *DefaultProvider) List(ctx context.Context, nodeClass *v1.EC2NodeClass) 
 	return lo.Values(subnets), nil
 }
 
+// associatePublicIPAddressValue validates whether we know the association value for all subnets AND
+// that all subnets don't have associatePublicIP set. If both of these are true, we set the value explicitly to false
+// For more detail see: https://github.com/aws/karpenter-provider-aws/pull/3814
+func (p *DefaultProvider) AssociatePublicIPAddressValue(nodeClass *v1beta1.EC2NodeClass) *bool {
+	for _, subnet := range nodeClass.Status.Subnets {
+		subnetAssociatePublicIP, ok := p.associatePublicIPAddressCache.Get(subnet.ID)
+		if !ok || subnetAssociatePublicIP.(bool) {
+			return nil
+		}
+	}
+	return lo.ToPtr(false)
+}
+
 // ZonalSubnetsForLaunch returns a mapping of zone to the subnet with the most available IP addresses and deducts the passed ips from the available count
-func (p *DefaultProvider) ZonalSubnetsForLaunch(ctx context.Context, nodeClass *v1.EC2NodeClass, instanceTypes []*cloudprovider.InstanceType, capacityType string) (map[string]*Subnet, error) {
+func (p *DefaultProvider) ZonalSubnetsForLaunch(ctx context.Context, nodeClass *v1beta1.EC2NodeClass, instanceTypes []*cloudprovider.InstanceType, capacityType string) (map[string]*Subnet, error) {
 	if len(nodeClass.Status.Subnets) == 0 {
 		return nil, fmt.Errorf("no subnets matched selector %v", nodeClass.Spec.SubnetSelectorTerms)
 	}
@@ -159,8 +173,8 @@ func (p *DefaultProvider) ZonalSubnetsForLaunch(ctx context.Context, nodeClass *
 
 	for _, subnet := range zonalSubnets {
 		predictedIPsUsed := p.minPods(instanceTypes, scheduling.NewRequirements(
-			scheduling.NewRequirement(karpv1.CapacityTypeLabelKey, corev1.NodeSelectorOpIn, capacityType),
-			scheduling.NewRequirement(corev1.LabelTopologyZone, corev1.NodeSelectorOpIn, subnet.Zone),
+			scheduling.NewRequirement(corev1beta1.CapacityTypeLabelKey, v1.NodeSelectorOpIn, capacityType),
+			scheduling.NewRequirement(v1.LabelTopologyZone, v1.NodeSelectorOpIn, subnet.Zone),
 		))
 		prevIPs := subnet.AvailableIPAddressCount
 		if trackedIPs, ok := p.inflightIPs[subnet.ID]; ok {
@@ -224,8 +238,8 @@ func (p *DefaultProvider) UpdateInflightIPs(createFleetInput *ec2.CreateFleetInp
 			// other IPs deducted were opportunistic and need to be readded since Fleet didn't pick those subnets to launch into
 			if ips, ok := p.inflightIPs[originalSubnet.ID]; ok {
 				minPods := p.minPods(instanceTypes, scheduling.NewRequirements(
-					scheduling.NewRequirement(karpv1.CapacityTypeLabelKey, corev1.NodeSelectorOpIn, capacityType),
-					scheduling.NewRequirement(corev1.LabelTopologyZone, corev1.NodeSelectorOpIn, originalSubnet.Zone),
+					scheduling.NewRequirement(corev1beta1.CapacityTypeLabelKey, v1.NodeSelectorOpIn, capacityType),
+					scheduling.NewRequirement(v1.LabelTopologyZone, v1.NodeSelectorOpIn, originalSubnet.Zone),
 				))
 				p.inflightIPs[originalSubnet.ID] = ips + minPods
 			}
@@ -243,7 +257,11 @@ func (p *DefaultProvider) LivenessProbe(_ *http.Request) error {
 func (p *DefaultProvider) minPods(instanceTypes []*cloudprovider.InstanceType, reqs scheduling.Requirements) int64 {
 	// filter for instance types available in the zone and capacity type being requested
 	filteredInstanceTypes := lo.Filter(instanceTypes, func(it *cloudprovider.InstanceType, _ int) bool {
-		return it.Offerings.Available().HasCompatible(reqs)
+		offering, ok := it.Offerings.Get(reqs)
+		if !ok {
+			return false
+		}
+		return offering.Available
 	})
 	if len(filteredInstanceTypes) == 0 {
 		return 0
@@ -255,7 +273,7 @@ func (p *DefaultProvider) minPods(instanceTypes []*cloudprovider.InstanceType, r
 	return pods
 }
 
-func getFilterSets(terms []v1.SubnetSelectorTerm) (res [][]*ec2.Filter) {
+func getFilterSets(terms []v1beta1.SubnetSelectorTerm) (res [][]*ec2.Filter) {
 	idFilter := &ec2.Filter{Name: aws.String("subnet-id")}
 	for _, term := range terms {
 		switch {

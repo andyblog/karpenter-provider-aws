@@ -24,15 +24,15 @@ import (
 )
 
 func init() {
-	crmetrics.Registry.MustRegister(TerminationDurationSeconds)
+	crmetrics.Registry.MustRegister(TerminationSummary)
 }
 
 var (
-	TerminationDurationSeconds = prometheus.NewSummaryVec(
+	TerminationSummary = prometheus.NewSummaryVec(
 		prometheus.SummaryOpts{
 			Namespace:  metrics.Namespace,
 			Subsystem:  metrics.NodeSubsystem,
-			Name:       "termination_duration_seconds",
+			Name:       "termination_time_seconds",
 			Help:       "The time taken between a node's deletion request and the removal of its finalizer",
 			Objectives: metrics.SummaryObjectives(),
 		},

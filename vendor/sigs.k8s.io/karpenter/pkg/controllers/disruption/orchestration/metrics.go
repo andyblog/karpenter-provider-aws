@@ -24,23 +24,40 @@ import (
 )
 
 func init() {
-	crmetrics.Registry.MustRegister(disruptionQueueFailuresTotal)
+	crmetrics.Registry.MustRegister(disruptionReplacementNodeClaimInitializedHistogram, disruptionReplacementNodeClaimFailedCounter, disruptionQueueDepthGauge)
 }
 
 const (
-	voluntaryDisruptionSubsystem = "voluntary_disruption"
-	consolidationTypeLabel       = "consolidation_type"
-	decisionLabel                = "decision"
+	disruptionSubsystem    = "disruption"
+	methodLabel            = "method"
+	consolidationTypeLabel = "consolidation_type"
 )
 
 var (
-	disruptionQueueFailuresTotal = prometheus.NewCounterVec(
+	disruptionReplacementNodeClaimInitializedHistogram = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Namespace: metrics.Namespace,
+			Subsystem: disruptionSubsystem,
+			Name:      "replacement_nodeclaim_initialized_seconds",
+			Help:      "Amount of time required for a replacement nodeclaim to become initialized.",
+			Buckets:   metrics.DurationBuckets(),
+		},
+	)
+	disruptionReplacementNodeClaimFailedCounter = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: metrics.Namespace,
-			Subsystem: voluntaryDisruptionSubsystem,
-			Name:      "queue_failures_total",
-			Help:      "The number of times that an enqueued disruption decision failed. Labeled by disruption method.",
+			Subsystem: disruptionSubsystem,
+			Name:      "replacement_nodeclaim_failures_total",
+			Help:      "The number of times that Karpenter failed to launch a replacement node for disruption. Labeled by disruption method.",
 		},
-		[]string{decisionLabel, metrics.ReasonLabel, consolidationTypeLabel},
+		[]string{methodLabel, consolidationTypeLabel},
+	)
+	disruptionQueueDepthGauge = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Namespace: metrics.Namespace,
+			Subsystem: disruptionSubsystem,
+			Name:      "queue_depth",
+			Help:      "The number of commands currently being waited on in the disruption orchestration queue.",
+		},
 	)
 )

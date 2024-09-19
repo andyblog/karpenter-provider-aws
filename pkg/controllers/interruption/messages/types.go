@@ -35,12 +35,11 @@ type Message interface {
 type Kind string
 
 const (
-	RebalanceRecommendationKind Kind = "rebalance_recommendation"
-	ScheduledChangeKind         Kind = "scheduled_change"
-	SpotInterruptionKind        Kind = "spot_interrupted"
-	InstanceStoppedKind         Kind = "instance_stopped"
-	InstanceTerminatedKind      Kind = "instance_terminated"
-	NoOpKind                    Kind = "no_op"
+	RebalanceRecommendationKind Kind = "RebalanceRecommendationKind"
+	ScheduledChangeKind         Kind = "ScheduledChangeKind"
+	SpotInterruptionKind        Kind = "SpotInterruptionKind"
+	StateChangeKind             Kind = "StateChangeKind"
+	NoOpKind                    Kind = "NoOpKind"
 )
 
 type Metadata struct {

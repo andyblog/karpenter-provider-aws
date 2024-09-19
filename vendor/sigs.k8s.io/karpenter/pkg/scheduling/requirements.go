@@ -22,13 +22,13 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/awslabs/operatorpkg/option"
 	"github.com/samber/lo"
 	"go.uber.org/multierr"
-	corev1 "k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
 
-	v1 "sigs.k8s.io/karpenter/pkg/apis/v1"
+	"sigs.k8s.io/karpenter/pkg/apis/v1beta1"
+	"sigs.k8s.io/karpenter/pkg/utils/functional"
 )
 
 // Requirements are an efficient set representation under the hood. Since its underlying
@@ -44,7 +44,7 @@ func NewRequirements(requirements ...*Requirement) Requirements {
 }
 
 // NewRequirements constructs requirements from NodeSelectorRequirementWithMinValues
-func NewNodeSelectorRequirementsWithMinValues(requirements ...v1.NodeSelectorRequirementWithMinValues) Requirements {
+func NewNodeSelectorRequirementsWithMinValues(requirements ...v1beta1.NodeSelectorRequirementWithMinValues) Requirements {
 	r := NewRequirements()
 	for _, requirement := range requirements {
 		r.Add(NewRequirementWithFlexibility(requirement.Key, requirement.Operator, requirement.MinValues, requirement.Values...))
@@ -53,7 +53,7 @@ func NewNodeSelectorRequirementsWithMinValues(requirements ...v1.NodeSelectorReq
 }
 
 // NewRequirements constructs requirements from NodeSelectorRequirements
-func NewNodeSelectorRequirements(requirements ...corev1.NodeSelectorRequirement) Requirements {
+func NewNodeSelectorRequirements(requirements ...v1.NodeSelectorRequirement) Requirements {
 	r := NewRequirements()
 	for _, requirement := range requirements {
 		r.Add(NewRequirementWithFlexibility(requirement.Key, requirement.Operator, nil, requirement.Values...))
@@ -65,18 +65,18 @@ func NewNodeSelectorRequirements(requirements ...corev1.NodeSelectorRequirement)
 func NewLabelRequirements(labels map[string]string) Requirements {
 	requirements := NewRequirements()
 	for key, value := range labels {
-		requirements.Add(NewRequirement(key, corev1.NodeSelectorOpIn, value))
+		requirements.Add(NewRequirement(key, v1.NodeSelectorOpIn, value))
 	}
 	return requirements
 }
 
 // NewPodRequirements constructs requirements from a pod and treats any preferred requirements as required.
-func NewPodRequirements(pod *corev1.Pod) Requirements {
+func NewPodRequirements(pod *v1.Pod) Requirements {
 	return newPodRequirements(pod, podRequirementTypeAll)
 }
 
 // NewStrictPodRequirements constructs requirements from a pod and only includes true requirements (not preferences).
-func NewStrictPodRequirements(pod *corev1.Pod) Requirements {
+func NewStrictPodRequirements(pod *v1.Pod) Requirements {
 	return newPodRequirements(pod, podRequirementTypeRequiredOnly)
 }
 
@@ -87,7 +87,7 @@ const (
 	podRequirementTypeRequiredOnly
 )
 
-func newPodRequirements(pod *corev1.Pod, typ podRequirementType) Requirements {
+func newPodRequirements(pod *v1.Pod, typ podRequirementType) Requirements {
 	requirements := NewLabelRequirements(pod.Spec.NodeSelector)
 	if pod.Spec.Affinity == nil || pod.Spec.Affinity.NodeAffinity == nil {
 		return requirements
@@ -110,15 +110,15 @@ func newPodRequirements(pod *corev1.Pod, typ podRequirementType) Requirements {
 }
 
 // HasPreferredNodeAffinity returns true if the pod has a preferred node affinity term
-func HasPreferredNodeAffinity(p *corev1.Pod) bool {
+func HasPreferredNodeAffinity(p *v1.Pod) bool {
 	if p == nil {
 		return false
 	}
 	return p.Spec.Affinity != nil && p.Spec.Affinity.NodeAffinity != nil && len(p.Spec.Affinity.NodeAffinity.PreferredDuringSchedulingIgnoredDuringExecution) > 0
 }
 
-func (r Requirements) NodeSelectorRequirements() []v1.NodeSelectorRequirementWithMinValues {
-	return lo.Map(lo.Values(r), func(req *Requirement, _ int) v1.NodeSelectorRequirementWithMinValues {
+func (r Requirements) NodeSelectorRequirements() []v1beta1.NodeSelectorRequirementWithMinValues {
+	return lo.Map(lo.Values(r), func(req *Requirement, _ int) v1beta1.NodeSelectorRequirementWithMinValues {
 		return req.NodeSelectorRequirement()
 	})
 }
@@ -154,7 +154,7 @@ func (r Requirements) Has(key string) bool {
 func (r Requirements) Get(key string) *Requirement {
 	if _, ok := r[key]; !ok {
 		// If not defined, allow any values with the exists operator
-		return NewRequirement(key, corev1.NodeSelectorOpExists)
+		return NewRequirement(key, v1.NodeSelectorOpExists)
 	}
 	return r[key]
 }
@@ -163,21 +163,17 @@ type CompatibilityOptions struct {
 	AllowUndefined sets.Set[string]
 }
 
-var AllowUndefinedWellKnownLabels = func(options *CompatibilityOptions) {
-	options.AllowUndefined = v1.WellKnownLabels
-}
-
-func (r Requirements) IsCompatible(requirements Requirements, options ...option.Function[CompatibilityOptions]) bool {
-	return r.Compatible(requirements, options...) == nil
+var AllowUndefinedWellKnownLabels = func(options CompatibilityOptions) CompatibilityOptions {
+	options.AllowUndefined = v1beta1.WellKnownLabels
+	return options
 }
 
 // Compatible ensures the provided requirements can loosely be met.
-func (r Requirements) Compatible(requirements Requirements, options ...option.Function[CompatibilityOptions]) (errs error) {
-	opts := option.Resolve(options...)
-
+func (r Requirements) Compatible(requirements Requirements, options ...functional.Option[CompatibilityOptions]) (errs error) {
+	opts := functional.ResolveOptions(options...)
 	// Custom Labels must intersect, but if not defined are denied.
 	for key := range requirements.Keys().Difference(opts.AllowUndefined) {
-		if operator := requirements.Get(key).Operator(); r.Has(key) || operator == corev1.NodeSelectorOpNotIn || operator == corev1.NodeSelectorOpDoesNotExist {
+		if operator := requirements.Get(key).Operator(); r.Has(key) || operator == v1.NodeSelectorOpNotIn || operator == v1.NodeSelectorOpDoesNotExist {
 			continue
 		}
 		errs = multierr.Append(errs, fmt.Errorf("label %q does not have known values%s", key, labelHint(r, key, opts.AllowUndefined)))
@@ -287,9 +283,9 @@ func (r Requirements) Intersects(requirements Requirements) (errs error) {
 		// There must be some value, except
 		if existing.Intersection(incoming).Len() == 0 {
 			// where the incoming requirement has operator { NotIn, DoesNotExist }
-			if operator := incoming.Operator(); operator == corev1.NodeSelectorOpNotIn || operator == corev1.NodeSelectorOpDoesNotExist {
+			if operator := incoming.Operator(); operator == v1.NodeSelectorOpNotIn || operator == v1.NodeSelectorOpDoesNotExist {
 				// and the existing requirement has operator { NotIn, DoesNotExist }
-				if operator := existing.Operator(); operator == corev1.NodeSelectorOpNotIn || operator == corev1.NodeSelectorOpDoesNotExist {
+				if operator := existing.Operator(); operator == v1.NodeSelectorOpNotIn || operator == v1.NodeSelectorOpDoesNotExist {
 					continue
 				}
 			}
@@ -306,7 +302,7 @@ func (r Requirements) Intersects(requirements Requirements) (errs error) {
 func (r Requirements) Labels() map[string]string {
 	labels := map[string]string{}
 	for key, requirement := range r {
-		if !v1.IsRestrictedNodeLabel(key) {
+		if !v1beta1.IsRestrictedNodeLabel(key) {
 			if value := requirement.Any(); value != "" {
 				labels[key] = value
 			}
@@ -326,7 +322,7 @@ func (r Requirements) HasMinValues() bool {
 
 func (r Requirements) String() string {
 	requirements := lo.Reject(r.Values(), func(requirement *Requirement, _ int) bool {
-		return v1.RestrictedLabels.Has(requirement.Key)
+		return v1beta1.RestrictedLabels.Has(requirement.Key)
 	})
 	stringRequirements := lo.Map(requirements, func(requirement *Requirement, _ int) string { return requirement.String() })
 	slices.Sort(stringRequirements)

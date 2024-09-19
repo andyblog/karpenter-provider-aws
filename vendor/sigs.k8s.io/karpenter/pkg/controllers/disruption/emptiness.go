@@ -18,131 +18,70 @@ package disruption
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"time"
 
 	"github.com/samber/lo"
-
-	"sigs.k8s.io/controller-runtime/pkg/log"
+	"k8s.io/utils/clock"
 
 	disruptionevents "sigs.k8s.io/karpenter/pkg/controllers/disruption/events"
 	"sigs.k8s.io/karpenter/pkg/controllers/provisioning/scheduling"
+	"sigs.k8s.io/karpenter/pkg/events"
 
-	v1 "sigs.k8s.io/karpenter/pkg/apis/v1"
+	"sigs.k8s.io/karpenter/pkg/apis/v1beta1"
+	"sigs.k8s.io/karpenter/pkg/metrics"
 )
 
 // Emptiness is a subreconciler that deletes empty candidates.
+// Emptiness will respect TTLSecondsAfterEmpty
 type Emptiness struct {
-	consolidation
+	clock    clock.Clock
+	recorder events.Recorder
 }
 
-func NewEmptiness(c consolidation) *Emptiness {
+func NewEmptiness(clk clock.Clock, recorder events.Recorder) *Emptiness {
 	return &Emptiness{
-		consolidation: c,
+		clock:    clk,
+		recorder: recorder,
 	}
 }
 
 // ShouldDisrupt is a predicate used to filter candidates
-func (e *Emptiness) ShouldDisrupt(ctx context.Context, c *Candidate) bool {
-	// If consolidation is disabled, don't do anything. This emptiness should run for both WhenEmpty and WhenEmptyOrUnderutilized
-	if c.nodePool.Spec.Disruption.ConsolidateAfter.Duration == nil {
+func (e *Emptiness) ShouldDisrupt(_ context.Context, c *Candidate) bool {
+	// If we don't have the "WhenEmpty" policy set, we should not do this method, but
+	// we should also not fire an event here to users since this can be confusing when the field on the NodePool
+	// is named "consolidationPolicy"
+	if c.nodePool.Spec.Disruption.ConsolidationPolicy != v1beta1.ConsolidationPolicyWhenEmpty {
+		return false
+	}
+	if c.nodePool.Spec.Disruption.ConsolidateAfter != nil && c.nodePool.Spec.Disruption.ConsolidateAfter.Duration == nil {
 		e.recorder.Publish(disruptionevents.Unconsolidatable(c.Node, c.NodeClaim, fmt.Sprintf("NodePool %q has consolidation disabled", c.nodePool.Name))...)
 		return false
 	}
-	// return true if there are no pods and the nodeclaim is consolidatable
-
-
-	log.FromContext(ctx).V(1).
-		WithValues("Emptiness ShouldDisrupt reschedulablePods", len(c.reschedulablePods) == 0 ).
-		WithValues("Emptiness ShouldDisrupt ConditionTypeConsolidatable", c.NodeClaim.StatusConditions().Get(v1.ConditionTypeConsolidatable).IsTrue()).
-		WithValues("nodeName",c.Node.Name).
-		//WithValues("disruption",disruption).
-		//WithValues("error", err).
-		Info("#debug20")
-	time.Sleep(5*time.Millisecond)
-
-	return len(c.reschedulablePods) == 0 && c.NodeClaim.StatusConditions().Get(v1.ConditionTypeConsolidatable).IsTrue()
+	if len(c.reschedulablePods) != 0 {
+		return false
+	}
+	return c.NodeClaim.StatusConditions().Get(v1beta1.ConditionTypeEmpty).IsTrue() &&
+		!e.clock.Now().Before(c.NodeClaim.StatusConditions().Get(v1beta1.ConditionTypeEmpty).LastTransitionTime.Add(*c.nodePool.Spec.Disruption.ConsolidateAfter.Duration))
 }
 
 // ComputeCommand generates a disruption command given candidates
-//
-//nolint:gocyclo
-func (e *Emptiness) ComputeCommand(ctx context.Context, disruptionBudgetMapping map[string]map[v1.DisruptionReason]int, candidates ...*Candidate) (Command, scheduling.Results, error) {
-	if e.IsConsolidated() {
-		return Command{}, scheduling.Results{}, nil
-	}
-	candidates = e.sortCandidates(candidates)
-
-	empty := make([]*Candidate, 0, len(candidates))
-	constrainedByBudgets := false
-	for _, candidate := range candidates {
-		if len(candidate.reschedulablePods) > 0 {
-			continue
-		}
-		if disruptionBudgetMapping[candidate.nodePool.Name][e.Reason()] == 0 {
-			// set constrainedByBudgets to true if any node was a candidate but was constrained by a budget
-			constrainedByBudgets = true
-			continue
-		}
-		// If there's disruptions allowed for the candidate's nodepool,
-		// add it to the list of candidates, and decrement the budget.
-		empty = append(empty, candidate)
-		disruptionBudgetMapping[candidate.nodePool.Name][e.Reason()]--
-	}
-	// none empty, so do nothing
-	if len(empty) == 0 {
-		// if there are no candidates, but a nodepool had a fully blocking budget,
-		// don't mark the cluster as consolidated, as it's possible this nodepool
-		// should be consolidated the next time we try to disrupt.
-		if !constrainedByBudgets {
-			e.markConsolidated()
-		}
-		return Command{}, scheduling.Results{}, nil
-	}
-
-	cmd := Command{
-		candidates: empty,
-	}
-
-	// Empty Node Consolidation doesn't use Validation as we get to take advantage of cluster.IsNodeNominated.  This
-	// lets us avoid a scheduling simulation (which is performed periodically while pending pods exist and drives
-	// cluster.IsNodeNominated already).
-	select {
-	case <-ctx.Done():
-		return Command{}, scheduling.Results{}, errors.New("interrupted")
-	case <-e.clock.After(consolidationTTL):
-	}
-
-	v := NewValidation(e.clock, e.cluster, e.kubeClient, e.provisioner, e.cloudProvider, e.recorder, e.queue, e.Reason())
-	validatedCandidates, err := v.ValidateCandidates(ctx, cmd.candidates...)
-	if err != nil {
-		if IsValidationError(err) {
-			log.FromContext(ctx).V(1).Info(fmt.Sprintf("abandoning empty node consolidation attempt due to pod churn, command is no longer valid, %s", cmd))
-			return Command{}, scheduling.Results{}, nil
-		}
-		return Command{}, scheduling.Results{}, err
-	}
-
-	// TODO (jmdeal@): better encapsulate within validation
-	if lo.ContainsBy(validatedCandidates, func(c *Candidate) bool {
-		return len(c.reschedulablePods) != 0
-	}) {
-		log.FromContext(ctx).V(1).Info(fmt.Sprintf("abandoning empty node consolidation attempt due to pod churn, command is no longer valid, %s", cmd))
-		return Command{}, scheduling.Results{}, nil
-	}
-
-	return cmd, scheduling.Results{}, nil
+func (e *Emptiness) ComputeCommand(_ context.Context, disruptionBudgetMapping map[string]int, candidates ...*Candidate) (Command, scheduling.Results, error) {
+	return Command{
+		candidates: lo.Filter(candidates, func(c *Candidate, _ int) bool {
+			// Include candidate iff disruptions are allowed for its nodepool.
+			if disruptionBudgetMapping[c.nodePool.Name] > 0 {
+				disruptionBudgetMapping[c.nodePool.Name]--
+				return true
+			}
+			return false
+		}),
+	}, scheduling.Results{}, nil
 }
 
-func (e *Emptiness) Reason() v1.DisruptionReason {
-	return v1.DisruptionReasonEmpty
-}
-
-func (e *Emptiness) Class() string {
-	return GracefulDisruptionClass
+func (e *Emptiness) Type() string {
+	return metrics.EmptinessReason
 }
 
 func (e *Emptiness) ConsolidationType() string {
-	return "empty"
+	return ""
 }

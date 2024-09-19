@@ -24,10 +24,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/samber/lo"
 
-	v1 "sigs.k8s.io/karpenter/pkg/apis/v1"
+	"sigs.k8s.io/karpenter/pkg/apis/v1beta1"
 	"sigs.k8s.io/karpenter/pkg/cloudprovider"
+	"sigs.k8s.io/karpenter/pkg/metrics"
+	"sigs.k8s.io/karpenter/pkg/operator/options"
 	"sigs.k8s.io/karpenter/pkg/scheduling"
 )
 
@@ -41,13 +44,21 @@ type Drift struct {
 	cloudProvider cloudprovider.CloudProvider
 }
 
-func (d *Drift) Reconcile(ctx context.Context, nodePool *v1.NodePool, nodeClaim *v1.NodeClaim) (reconcile.Result, error) {
-	hasDriftedCondition := nodeClaim.StatusConditions().Get(v1.ConditionTypeDrifted) != nil
+func (d *Drift) Reconcile(ctx context.Context, nodePool *v1beta1.NodePool, nodeClaim *v1beta1.NodeClaim) (reconcile.Result, error) {
+	hasDriftedCondition := nodeClaim.StatusConditions().Get(v1beta1.ConditionTypeDrifted) != nil
 
 	// From here there are three scenarios to handle:
-	// 1. If NodeClaim is not launched, remove the drift status condition
-	if !nodeClaim.StatusConditions().Get(v1.ConditionTypeLaunched).IsTrue() {
-		_ = nodeClaim.StatusConditions().Clear(v1.ConditionTypeDrifted)
+	// 1. If drift is not enabled but the NodeClaim is drifted, remove the status condition
+	if !options.FromContext(ctx).FeatureGates.Drift {
+		_ = nodeClaim.StatusConditions().Clear(v1beta1.ConditionTypeDrifted)
+		if hasDriftedCondition {
+			log.FromContext(ctx).V(1).Info("removing drift status condition, drift has been disabled")
+		}
+		return reconcile.Result{}, nil
+	}
+	// 2. If NodeClaim is not launched, remove the drift status condition
+	if !nodeClaim.StatusConditions().Get(v1beta1.ConditionTypeLaunched).IsTrue() {
+		_ = nodeClaim.StatusConditions().Clear(v1beta1.ConditionTypeDrifted)
 		if hasDriftedCondition {
 			log.FromContext(ctx).V(1).Info("removing drift status condition, isn't launched")
 		}
@@ -57,25 +68,33 @@ func (d *Drift) Reconcile(ctx context.Context, nodePool *v1.NodePool, nodeClaim 
 	if err != nil {
 		return reconcile.Result{}, cloudprovider.IgnoreNodeClaimNotFoundError(fmt.Errorf("getting drift, %w", err))
 	}
-	// 2. Otherwise, if the NodeClaim isn't drifted, but has the status condition, remove it.
+	// 3. Otherwise, if the NodeClaim isn't drifted, but has the status condition, remove it.
 	if driftedReason == "" {
+		_ = nodeClaim.StatusConditions().Clear(v1beta1.ConditionTypeDrifted)
 		if hasDriftedCondition {
-			_ = nodeClaim.StatusConditions().Clear(v1.ConditionTypeDrifted)
 			log.FromContext(ctx).V(1).Info("removing drifted status condition, not drifted")
 		}
 		return reconcile.Result{RequeueAfter: 5 * time.Minute}, nil
 	}
-	// 3. Finally, if the NodeClaim is drifted, but doesn't have status condition, add it.
-	nodeClaim.StatusConditions().SetTrueWithReason(v1.ConditionTypeDrifted, string(driftedReason), string(driftedReason))
+	// 4. Finally, if the NodeClaim is drifted, but doesn't have status condition, add it.
+	nodeClaim.StatusConditions().SetTrueWithReason(v1beta1.ConditionTypeDrifted, string(driftedReason), string(driftedReason))
 	if !hasDriftedCondition {
 		log.FromContext(ctx).V(1).WithValues("reason", string(driftedReason)).Info("marking drifted")
+		metrics.NodeClaimsDisruptedCounter.With(prometheus.Labels{
+			metrics.TypeLabel:     metrics.DriftReason,
+			metrics.NodePoolLabel: nodeClaim.Labels[v1beta1.NodePoolLabelKey],
+		}).Inc()
+		metrics.NodeClaimsDriftedCounter.With(prometheus.Labels{
+			metrics.TypeLabel:     string(driftedReason),
+			metrics.NodePoolLabel: nodeClaim.Labels[v1beta1.NodePoolLabelKey],
+		}).Inc()
 	}
 	// Requeue after 5 minutes for the cache TTL
 	return reconcile.Result{RequeueAfter: 5 * time.Minute}, nil
 }
 
 // isDrifted will check if a NodeClaim is drifted from the fields in the NodePool Spec and the CloudProvider
-func (d *Drift) isDrifted(ctx context.Context, nodePool *v1.NodePool, nodeClaim *v1.NodeClaim) (cloudprovider.DriftReason, error) {
+func (d *Drift) isDrifted(ctx context.Context, nodePool *v1beta1.NodePool, nodeClaim *v1beta1.NodeClaim) (cloudprovider.DriftReason, error) {
 	// First check for static drift or node requirements have drifted to save on API calls.
 	if reason := lo.FindOrElse([]cloudprovider.DriftReason{areStaticFieldsDrifted(nodePool, nodeClaim), areRequirementsDrifted(nodePool, nodeClaim)}, "", func(i cloudprovider.DriftReason) bool {
 		return i != ""
@@ -91,11 +110,11 @@ func (d *Drift) isDrifted(ctx context.Context, nodePool *v1.NodePool, nodeClaim 
 
 // Eligible fields for drift are described in the docs
 // https://karpenter.sh/docs/concepts/deprovisioning/#drift
-func areStaticFieldsDrifted(nodePool *v1.NodePool, nodeClaim *v1.NodeClaim) cloudprovider.DriftReason {
-	nodePoolHash, foundNodePoolHash := nodePool.Annotations[v1.NodePoolHashAnnotationKey]
-	nodePoolHashVersion, foundNodePoolHashVersion := nodePool.Annotations[v1.NodePoolHashVersionAnnotationKey]
-	nodeClaimHash, foundNodeClaimHash := nodeClaim.Annotations[v1.NodePoolHashAnnotationKey]
-	nodeClaimHashVersion, foundNodeClaimHashVersion := nodeClaim.Annotations[v1.NodePoolHashVersionAnnotationKey]
+func areStaticFieldsDrifted(nodePool *v1beta1.NodePool, nodeClaim *v1beta1.NodeClaim) cloudprovider.DriftReason {
+	nodePoolHash, foundNodePoolHash := nodePool.Annotations[v1beta1.NodePoolHashAnnotationKey]
+	nodePoolHashVersion, foundNodePoolHashVersion := nodePool.Annotations[v1beta1.NodePoolHashVersionAnnotationKey]
+	nodeClaimHash, foundNodeClaimHash := nodeClaim.Annotations[v1beta1.NodePoolHashAnnotationKey]
+	nodeClaimHashVersion, foundNodeClaimHashVersion := nodeClaim.Annotations[v1beta1.NodePoolHashVersionAnnotationKey]
 
 	if !foundNodePoolHash || !foundNodePoolHashVersion || !foundNodeClaimHash || !foundNodeClaimHashVersion {
 		return ""
@@ -107,7 +126,7 @@ func areStaticFieldsDrifted(nodePool *v1.NodePool, nodeClaim *v1.NodeClaim) clou
 	return lo.Ternary(nodePoolHash != nodeClaimHash, NodePoolDrifted, "")
 }
 
-func areRequirementsDrifted(nodePool *v1.NodePool, nodeClaim *v1.NodeClaim) cloudprovider.DriftReason {
+func areRequirementsDrifted(nodePool *v1beta1.NodePool, nodeClaim *v1beta1.NodeClaim) cloudprovider.DriftReason {
 	nodepoolReq := scheduling.NewNodeSelectorRequirementsWithMinValues(nodePool.Spec.Template.Spec.Requirements...)
 	nodeClaimReq := scheduling.NewLabelRequirements(nodeClaim.Labels)
 

@@ -28,7 +28,7 @@ import (
 	"sigs.k8s.io/karpenter/pkg/cloudprovider"
 	"sigs.k8s.io/yaml"
 
-	v1 "github.com/aws/karpenter-provider-aws/pkg/apis/v1"
+	"github.com/aws/karpenter-provider-aws/pkg/apis/v1beta1"
 	"github.com/aws/karpenter-provider-aws/pkg/providers/amifamily/bootstrap/mime"
 )
 
@@ -45,10 +45,10 @@ func (n Nodeadm) Script() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("parsing custom UserData, %w", err)
 	}
-	mimeArchive := mime.Archive(append(customEntries, mime.Entry{
+	mimeArchive := mime.Archive(append([]mime.Entry{{
 		ContentType: mime.ContentTypeNodeConfig,
 		Content:     nodeConfigYAML,
-	}))
+	}}, customEntries...))
 	userData, err := mimeArchive.Serialize()
 	if err != nil {
 		return "", err
@@ -83,7 +83,7 @@ func (n Nodeadm) getNodeConfigYAML() (string, error) {
 	} else {
 		return "", cloudprovider.NewNodeClassNotReadyError(fmt.Errorf("resolving cluster CIDR"))
 	}
-	if lo.FromPtr(n.InstanceStorePolicy) == v1.InstanceStorePolicyRAID0 {
+	if lo.FromPtr(n.InstanceStorePolicy) == v1beta1.InstanceStorePolicyRAID0 {
 		config.Spec.Instance.LocalStorage.Strategy = admv1alpha1.LocalStorageRAID0
 	}
 	inlineConfig, err := n.generateInlineKubeletConfiguration()
@@ -115,8 +115,10 @@ func (n Nodeadm) generateInlineKubeletConfiguration() (map[string]runtime.RawExt
 	if err != nil {
 		return nil, err
 	}
-	kubeConfigMap["registerWithTaints"] = runtime.RawExtension{
-		Raw: lo.Must(json.Marshal(n.Taints)),
+	if len(n.Taints) != 0 {
+		kubeConfigMap["registerWithTaints"] = runtime.RawExtension{
+			Raw: lo.Must(json.Marshal(n.Taints)),
+		}
 	}
 	return kubeConfigMap, nil
 }

@@ -15,22 +15,20 @@ limitations under the License.
 package amifamily
 
 import (
-	"context"
 	"fmt"
-	"strings"
 
 	"github.com/samber/lo"
 
-	v1 "github.com/aws/karpenter-provider-aws/pkg/apis/v1"
+	corev1beta1 "sigs.k8s.io/karpenter/pkg/apis/v1beta1"
+
+	"github.com/aws/karpenter-provider-aws/pkg/apis/v1beta1"
 	"github.com/aws/karpenter-provider-aws/pkg/providers/amifamily/bootstrap"
-	"github.com/aws/karpenter-provider-aws/pkg/providers/ssm"
 
 	"sigs.k8s.io/karpenter/pkg/cloudprovider"
 	"sigs.k8s.io/karpenter/pkg/scheduling"
 
 	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/service/ec2"
-	corev1 "k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
@@ -39,40 +37,58 @@ type Bottlerocket struct {
 	*Options
 }
 
-func (b Bottlerocket) DescribeImageQuery(ctx context.Context, ssmProvider ssm.Provider, k8sVersion string, amiVersion string) (DescribeImageQuery, error) {
-	// Bottlerocket AMIs versions are prefixed with a v on GitHub, but not in the SSM path. We should accept both.
-	trimmedAMIVersion := strings.TrimLeft(amiVersion, "v")
-	ids := map[string][]Variant{}
-	for path, variants := range map[string][]Variant{
-		fmt.Sprintf("/aws/service/bottlerocket/aws-k8s-%s/x86_64/%s/image_id", k8sVersion, trimmedAMIVersion):        {VariantStandard},
-		fmt.Sprintf("/aws/service/bottlerocket/aws-k8s-%s/arm64/%s/image_id", k8sVersion, trimmedAMIVersion):         {VariantStandard},
-		fmt.Sprintf("/aws/service/bottlerocket/aws-k8s-%s-nvidia/x86_64/%s/image_id", k8sVersion, trimmedAMIVersion): {VariantNeuron, VariantNvidia},
-		fmt.Sprintf("/aws/service/bottlerocket/aws-k8s-%s-nvidia/arm64/%s/image_id", k8sVersion, trimmedAMIVersion):  {VariantNeuron, VariantNvidia},
-	} {
-		imageID, err := ssmProvider.Get(ctx, path)
-		if err != nil {
-			continue
-		}
-		ids[imageID] = variants
+// DefaultAMIs returns the AMI name, and Requirements, with an SSM query
+func (b Bottlerocket) DefaultAMIs(version string) []DefaultAMIOutput {
+	return []DefaultAMIOutput{
+		{
+			Query: fmt.Sprintf("/aws/service/bottlerocket/aws-k8s-%s/x86_64/latest/image_id", version),
+			Requirements: scheduling.NewRequirements(
+				scheduling.NewRequirement(v1.LabelArchStable, v1.NodeSelectorOpIn, corev1beta1.ArchitectureAmd64),
+				scheduling.NewRequirement(v1beta1.LabelInstanceGPUCount, v1.NodeSelectorOpDoesNotExist),
+				scheduling.NewRequirement(v1beta1.LabelInstanceAcceleratorCount, v1.NodeSelectorOpDoesNotExist),
+			),
+		},
+		{
+			Query: fmt.Sprintf("/aws/service/bottlerocket/aws-k8s-%s-nvidia/x86_64/latest/image_id", version),
+			Requirements: scheduling.NewRequirements(
+				scheduling.NewRequirement(v1.LabelArchStable, v1.NodeSelectorOpIn, corev1beta1.ArchitectureAmd64),
+				scheduling.NewRequirement(v1beta1.LabelInstanceGPUCount, v1.NodeSelectorOpExists),
+			),
+		},
+		{
+			Query: fmt.Sprintf("/aws/service/bottlerocket/aws-k8s-%s-nvidia/x86_64/latest/image_id", version),
+			Requirements: scheduling.NewRequirements(
+				scheduling.NewRequirement(v1.LabelArchStable, v1.NodeSelectorOpIn, corev1beta1.ArchitectureAmd64),
+				scheduling.NewRequirement(v1beta1.LabelInstanceAcceleratorCount, v1.NodeSelectorOpExists),
+			),
+		},
+		{
+			Query: fmt.Sprintf("/aws/service/bottlerocket/aws-k8s-%s/%s/latest/image_id", version, corev1beta1.ArchitectureArm64),
+			Requirements: scheduling.NewRequirements(
+				scheduling.NewRequirement(v1.LabelArchStable, v1.NodeSelectorOpIn, corev1beta1.ArchitectureArm64),
+				scheduling.NewRequirement(v1beta1.LabelInstanceGPUCount, v1.NodeSelectorOpDoesNotExist),
+				scheduling.NewRequirement(v1beta1.LabelInstanceAcceleratorCount, v1.NodeSelectorOpDoesNotExist),
+			),
+		},
+		{
+			Query: fmt.Sprintf("/aws/service/bottlerocket/aws-k8s-%s-nvidia/%s/latest/image_id", version, corev1beta1.ArchitectureArm64),
+			Requirements: scheduling.NewRequirements(
+				scheduling.NewRequirement(v1.LabelArchStable, v1.NodeSelectorOpIn, corev1beta1.ArchitectureArm64),
+				scheduling.NewRequirement(v1beta1.LabelInstanceGPUCount, v1.NodeSelectorOpExists),
+			),
+		},
+		{
+			Query: fmt.Sprintf("/aws/service/bottlerocket/aws-k8s-%s-nvidia/%s/latest/image_id", version, corev1beta1.ArchitectureArm64),
+			Requirements: scheduling.NewRequirements(
+				scheduling.NewRequirement(v1.LabelArchStable, v1.NodeSelectorOpIn, corev1beta1.ArchitectureArm64),
+				scheduling.NewRequirement(v1beta1.LabelInstanceAcceleratorCount, v1.NodeSelectorOpExists),
+			),
+		},
 	}
-	// Failed to discover any AMIs, we should short circuit AMI discovery
-	if len(ids) == 0 {
-		return DescribeImageQuery{}, fmt.Errorf(`failed to discover any AMIs for alias "bottlerocket@%s"`, amiVersion)
-	}
-
-	return DescribeImageQuery{
-		Filters: []*ec2.Filter{{
-			Name:   lo.ToPtr("image-id"),
-			Values: lo.ToSlicePtr(lo.Keys(ids)),
-		}},
-		KnownRequirements: lo.MapValues(ids, func(variants []Variant, _ string) []scheduling.Requirements {
-			return lo.Map(variants, func(v Variant, _ int) scheduling.Requirements { return v.Requirements() })
-		}),
-	}, nil
 }
 
 // UserData returns the default userdata script for the AMI Family
-func (b Bottlerocket) UserData(kubeletConfig *v1.KubeletConfiguration, taints []corev1.Taint, labels map[string]string, caBundle *string, _ []*cloudprovider.InstanceType, customUserData *string, _ *v1.InstanceStorePolicy) bootstrap.Bootstrapper {
+func (b Bottlerocket) UserData(kubeletConfig *corev1beta1.KubeletConfiguration, taints []v1.Taint, labels map[string]string, caBundle *string, _ []*cloudprovider.InstanceType, customUserData *string, _ *v1beta1.InstanceStorePolicy) bootstrap.Bootstrapper {
 	return bootstrap.Bottlerocket{
 		Options: bootstrap.Options{
 			ClusterName:     b.Options.ClusterName,
@@ -87,10 +103,10 @@ func (b Bottlerocket) UserData(kubeletConfig *v1.KubeletConfiguration, taints []
 }
 
 // DefaultBlockDeviceMappings returns the default block device mappings for the AMI Family
-func (b Bottlerocket) DefaultBlockDeviceMappings() []*v1.BlockDeviceMapping {
+func (b Bottlerocket) DefaultBlockDeviceMappings() []*v1beta1.BlockDeviceMapping {
 	xvdaEBS := DefaultEBS
 	xvdaEBS.VolumeSize = lo.ToPtr(resource.MustParse("4Gi"))
-	return []*v1.BlockDeviceMapping{
+	return []*v1beta1.BlockDeviceMapping{
 		{
 			DeviceName: aws.String("/dev/xvda"),
 			EBS:        &xvdaEBS,

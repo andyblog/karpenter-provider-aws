@@ -21,16 +21,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
-
-	"github.com/samber/lo"
-
-	"sigs.k8s.io/karpenter/pkg/utils/termination"
-
-	"sigs.k8s.io/karpenter/pkg/metrics"
-
 	"golang.org/x/time/rate"
-	corev1 "k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/client-go/util/workqueue"
@@ -48,10 +40,8 @@ import (
 
 	"sigs.k8s.io/karpenter/pkg/operator/injection"
 
-	v1 "sigs.k8s.io/karpenter/pkg/apis/v1"
+	"sigs.k8s.io/karpenter/pkg/apis/v1beta1"
 	"sigs.k8s.io/karpenter/pkg/cloudprovider"
-	terminatorevents "sigs.k8s.io/karpenter/pkg/controllers/node/termination/terminator/events"
-	"sigs.k8s.io/karpenter/pkg/events"
 	nodeclaimutil "sigs.k8s.io/karpenter/pkg/utils/nodeclaim"
 )
 
@@ -60,19 +50,17 @@ import (
 type Controller struct {
 	kubeClient    client.Client
 	cloudProvider cloudprovider.CloudProvider
-	recorder      events.Recorder
 }
 
 // NewController is a constructor for the NodeClaim Controller
-func NewController(kubeClient client.Client, cloudProvider cloudprovider.CloudProvider, recorder events.Recorder) *Controller {
+func NewController(kubeClient client.Client, cloudProvider cloudprovider.CloudProvider) *Controller {
 	return &Controller{
 		kubeClient:    kubeClient,
 		cloudProvider: cloudProvider,
-		recorder:      recorder,
 	}
 }
 
-func (c *Controller) Reconcile(ctx context.Context, n *v1.NodeClaim) (reconcile.Result, error) {
+func (c *Controller) Reconcile(ctx context.Context, n *v1beta1.NodeClaim) (reconcile.Result, error) {
 	ctx = injection.WithControllerName(ctx, "nodeclaim.termination")
 
 	if !n.GetDeletionTimestamp().IsZero() {
@@ -82,14 +70,11 @@ func (c *Controller) Reconcile(ctx context.Context, n *v1.NodeClaim) (reconcile.
 }
 
 //nolint:gocyclo
-func (c *Controller) finalize(ctx context.Context, nodeClaim *v1.NodeClaim) (reconcile.Result, error) {
+func (c *Controller) finalize(ctx context.Context, nodeClaim *v1beta1.NodeClaim) (reconcile.Result, error) {
 	ctx = log.IntoContext(ctx, log.FromContext(ctx).WithValues("Node", klog.KRef("", nodeClaim.Status.NodeName), "provider-id", nodeClaim.Status.ProviderID))
 	stored := nodeClaim.DeepCopy()
-	if !controllerutil.ContainsFinalizer(nodeClaim, v1.TerminationFinalizer) {
+	if !controllerutil.ContainsFinalizer(nodeClaim, v1beta1.TerminationFinalizer) {
 		return reconcile.Result{}, nil
-	}
-	if err := c.ensureTerminationGracePeriodTerminationTimeAnnotation(ctx, nodeClaim); err != nil {
-		return reconcile.Result{}, fmt.Errorf("adding nodeclaim terminationGracePeriod annotation, %w", err)
 	}
 	nodes, err := nodeclaimutil.AllNodesForNodeClaim(ctx, c.kubeClient, nodeClaim)
 	if err != nil {
@@ -108,29 +93,12 @@ func (c *Controller) finalize(ctx context.Context, nodeClaim *v1.NodeClaim) (rec
 	if len(nodes) > 0 {
 		return reconcile.Result{}, nil
 	}
-	var isInstanceTerminated bool
-	// We can expect ProviderID to be empty when there is a failure while launching the nodeClaim
 	if nodeClaim.Status.ProviderID != "" {
-		isInstanceTerminated, err = termination.EnsureTerminated(ctx, c.kubeClient, nodeClaim, c.cloudProvider)
-		if err != nil {
-			// 404 = the nodeClaim no longer exists
-			if errors.IsNotFound(err) {
-				return reconcile.Result{}, nil
-			}
-			// 409 - The nodeClaim exists, but its status has already been modified
-			if errors.IsConflict(err) {
-				return reconcile.Result{Requeue: true}, nil
-			}
-			return reconcile.Result{}, fmt.Errorf("ensuring instance termination, %w", err)
+		if err = c.cloudProvider.Delete(ctx, nodeClaim); cloudprovider.IgnoreNodeClaimNotFoundError(err) != nil {
+			return reconcile.Result{}, fmt.Errorf("terminating cloudprovider instance, %w", err)
 		}
-		if !isInstanceTerminated {
-			return reconcile.Result{RequeueAfter: 5 * time.Second}, nil
-		}
-		InstanceTerminationDurationSeconds.With(map[string]string{
-			metrics.NodePoolLabel: nodeClaim.Labels[v1.NodePoolLabelKey],
-		}).Observe(time.Since(nodeClaim.StatusConditions().Get(v1.ConditionTypeInstanceTerminating).LastTransitionTime.Time).Seconds())
 	}
-	controllerutil.RemoveFinalizer(nodeClaim, v1.TerminationFinalizer)
+	controllerutil.RemoveFinalizer(nodeClaim, v1beta1.TerminationFinalizer)
 	if !equality.Semantic.DeepEqual(stored, nodeClaim) {
 		// We call Update() here rather than Patch() because patching a list with a JSON merge patch
 		// can cause races due to the fact that it fully replaces the list on a change
@@ -142,45 +110,8 @@ func (c *Controller) finalize(ctx context.Context, nodeClaim *v1.NodeClaim) (rec
 			return reconcile.Result{}, client.IgnoreNotFound(fmt.Errorf("removing termination finalizer, %w", err))
 		}
 		log.FromContext(ctx).Info("deleted nodeclaim")
-		NodeClaimTerminationDurationSeconds.With(map[string]string{
-			metrics.NodePoolLabel: nodeClaim.Labels[v1.NodePoolLabelKey],
-		}).Observe(time.Since(stored.DeletionTimestamp.Time).Seconds())
-		metrics.NodeClaimsTerminatedTotal.With(prometheus.Labels{
-			metrics.NodePoolLabel:     nodeClaim.Labels[v1.NodePoolLabelKey],
-			metrics.CapacityTypeLabel: nodeClaim.Labels[v1.CapacityTypeLabelKey],
-		}).Inc()
 	}
 	return reconcile.Result{}, nil
-}
-
-func (c *Controller) ensureTerminationGracePeriodTerminationTimeAnnotation(ctx context.Context, nodeClaim *v1.NodeClaim) error {
-	// if the expiration annotation is already set, we don't need to do anything
-	if _, exists := nodeClaim.ObjectMeta.Annotations[v1.NodeClaimTerminationTimestampAnnotationKey]; exists {
-		return nil
-	}
-
-	// In Kubernetes, every object has a terminationGracePeriodSeconds, defaulted to and un-changeable from 0. There is an additional TerminationGracePeriodSeconds in the PodSpec which can be configured.
-	// We use the kubernetes object TerminationGracePeriod to infer that the DeletionTimestamp is always equal to the time the NodeClaim is deleted.
-	// This should not be confused with the NodeClaim.spec.terminationGracePeriod field introduced in Karpenter Custom Resources.
-	if nodeClaim.Spec.TerminationGracePeriod != nil && !nodeClaim.ObjectMeta.DeletionTimestamp.IsZero() {
-		terminationTimeString := nodeClaim.DeletionTimestamp.Time.Add(nodeClaim.Spec.TerminationGracePeriod.Duration).Format(time.RFC3339)
-		return c.annotateTerminationGracePeriodTerminationTime(ctx, nodeClaim, terminationTimeString)
-	}
-
-	return nil
-}
-
-func (c *Controller) annotateTerminationGracePeriodTerminationTime(ctx context.Context, nodeClaim *v1.NodeClaim, terminationTime string) error {
-	stored := nodeClaim.DeepCopy()
-	nodeClaim.ObjectMeta.Annotations = lo.Assign(nodeClaim.ObjectMeta.Annotations, map[string]string{v1.NodeClaimTerminationTimestampAnnotationKey: terminationTime})
-
-	if err := c.kubeClient.Patch(ctx, nodeClaim, client.MergeFrom(stored)); err != nil {
-		return client.IgnoreNotFound(fmt.Errorf("patching nodeclaim, %w", err))
-	}
-	log.FromContext(ctx).WithValues(v1.NodeClaimTerminationTimestampAnnotationKey, terminationTime).Info("annotated nodeclaim")
-	c.recorder.Publish(terminatorevents.NodeClaimTerminationGracePeriodExpiring(nodeClaim, terminationTime))
-
-	return nil
 }
 
 func (*Controller) Name() string {
@@ -190,10 +121,10 @@ func (*Controller) Name() string {
 func (c *Controller) Register(_ context.Context, m manager.Manager) error {
 	return controllerruntime.NewControllerManagedBy(m).
 		Named("nodeclaim.termination").
-		For(&v1.NodeClaim{}).
+		For(&v1beta1.NodeClaim{}).
 		WithEventFilter(predicate.GenerationChangedPredicate{}).
 		Watches(
-			&corev1.Node{},
+			&v1.Node{},
 			nodeclaimutil.NodeEventHandler(c.kubeClient),
 			// Watch for node deletion events
 			builder.WithPredicates(predicate.Funcs{

@@ -20,10 +20,12 @@ import (
 	"strings"
 
 	"github.com/samber/lo"
-	corev1 "k8s.io/api/core/v1"
+	core "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	v1 "github.com/aws/karpenter-provider-aws/pkg/apis/v1"
+	corev1beta1 "sigs.k8s.io/karpenter/pkg/apis/v1beta1"
+
+	"github.com/aws/karpenter-provider-aws/pkg/apis/v1beta1"
 )
 
 // Options is the node bootstrapping parameters passed from Karpenter to the provisioning node
@@ -31,14 +33,14 @@ type Options struct {
 	ClusterName             string
 	ClusterEndpoint         string
 	ClusterCIDR             *string
-	KubeletConfig           *v1.KubeletConfiguration
-	Taints                  []corev1.Taint    `hash:"set"`
+	KubeletConfig           *corev1beta1.KubeletConfiguration
+	Taints                  []core.Taint      `hash:"set"`
 	Labels                  map[string]string `hash:"set"`
 	CABundle                *string
 	AWSENILimitedPodDensity bool
 	ContainerRuntime        *string
 	CustomUserData          *string
-	InstanceStorePolicy     *v1.InstanceStorePolicy
+	InstanceStorePolicy     *v1beta1.InstanceStorePolicy
 }
 
 func (o Options) kubeletExtraArgs() (args []string) {
@@ -76,9 +78,12 @@ func (o Options) kubeletExtraArgs() (args []string) {
 }
 
 func (o Options) nodeTaintArg() string {
+	if len(o.Taints) == 0 {
+		return ""
+	}
 	var taintStrings []string
 	for _, taint := range o.Taints {
-		taintStrings = append(taintStrings, taint.ToString())
+		taintStrings = append(taintStrings, fmt.Sprintf("%s=%s:%s", taint.Key, taint.Value, taint.Effect))
 	}
 	return fmt.Sprintf("--register-with-taints=%q", strings.Join(taintStrings, ","))
 }

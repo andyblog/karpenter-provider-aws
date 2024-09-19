@@ -20,13 +20,13 @@ import (
 	"context"
 	"fmt"
 
-	corev1 "k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/utils/clock"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	v1 "sigs.k8s.io/karpenter/pkg/apis/v1"
+	"sigs.k8s.io/karpenter/pkg/apis/v1beta1"
+	"sigs.k8s.io/karpenter/pkg/controllers/disruption"
 	nodeutils "sigs.k8s.io/karpenter/pkg/utils/node"
-	"sigs.k8s.io/karpenter/pkg/utils/pdb"
 )
 
 // Termination detects nodes that are stuck terminating and reports why.
@@ -42,12 +42,12 @@ func NewTermination(clk clock.Clock, kubeClient client.Client) Check {
 	}
 }
 
-func (t *Termination) Check(ctx context.Context, node *corev1.Node, nodeClaim *v1.NodeClaim) ([]Issue, error) {
+func (t *Termination) Check(ctx context.Context, node *v1.Node, nodeClaim *v1beta1.NodeClaim) ([]Issue, error) {
 	// we are only looking at nodes that are hung deleting
 	if nodeClaim.DeletionTimestamp.IsZero() {
 		return nil, nil
 	}
-	pdbs, err := pdb.NewLimits(ctx, t.clk, t.kubeClient)
+	pdbs, err := disruption.NewPDBLimits(ctx, t.clk, t.kubeClient)
 	if err != nil {
 		return nil, err
 	}

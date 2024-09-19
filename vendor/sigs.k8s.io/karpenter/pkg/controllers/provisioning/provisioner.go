@@ -23,32 +23,27 @@ import (
 	"strings"
 	"time"
 
-	"github.com/awslabs/operatorpkg/option"
-	"github.com/awslabs/operatorpkg/status"
-
-	"github.com/awslabs/operatorpkg/singleton"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/samber/lo"
 	"go.uber.org/multierr"
 	appsv1 "k8s.io/api/apps/v1"
-	corev1 "k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
-	controllerruntime "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-
-	"sigs.k8s.io/karpenter/pkg/operator/injection"
 
 	nodeutil "sigs.k8s.io/karpenter/pkg/utils/node"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	v1 "sigs.k8s.io/karpenter/pkg/apis/v1"
+	"sigs.k8s.io/karpenter/pkg/apis/v1beta1"
+	"sigs.k8s.io/karpenter/pkg/operator/controller"
 	"sigs.k8s.io/karpenter/pkg/scheduling"
+	"sigs.k8s.io/karpenter/pkg/utils/functional"
 	"sigs.k8s.io/karpenter/pkg/utils/pretty"
 
 	"sigs.k8s.io/karpenter/pkg/cloudprovider"
@@ -66,12 +61,16 @@ type LaunchOptions struct {
 }
 
 // RecordPodNomination causes nominate pod events to be recorded against the node.
-func RecordPodNomination(o *LaunchOptions) {
+func RecordPodNomination(o LaunchOptions) LaunchOptions {
 	o.RecordPodNomination = true
+	return o
 }
 
-func WithReason(reason string) func(*LaunchOptions) {
-	return func(o *LaunchOptions) { o.Reason = reason }
+func WithReason(reason string) func(LaunchOptions) LaunchOptions {
+	return func(o LaunchOptions) LaunchOptions {
+		o.Reason = reason
+		return o
+	}
 }
 
 // Provisioner waits for enqueued pods, batches them, creates capacity and binds the pods to the capacity.
@@ -104,28 +103,24 @@ func (p *Provisioner) Trigger() {
 	p.batcher.Trigger()
 }
 
-func (p *Provisioner) Register(_ context.Context, m manager.Manager) error {
-	return controllerruntime.NewControllerManagedBy(m).
+func (p *Provisioner) Register(_ context.Context, mgr manager.Manager) error {
+	return controller.NewSingletonManagedBy(mgr).
 		Named("provisioner").
-		WatchesRawSource(singleton.Source()).
-		Complete(singleton.AsReconciler(p))
+		Complete(p)
 }
 
-func (p *Provisioner) Reconcile(ctx context.Context) (result reconcile.Result, err error) {
-	ctx = injection.WithControllerName(ctx, "provisioner")
-
-
+func (p *Provisioner) Reconcile(ctx context.Context, _ reconcile.Request) (result reconcile.Result, err error) {
+	// Batch pods
 	if triggered := p.batcher.Wait(ctx); !triggered {
-		return reconcile.Result{RequeueAfter: singleton.RequeueImmediately}, nil
+		return reconcile.Result{}, nil
 	}
 	// We need to ensure that our internal cluster state mechanism is synced before we proceed
 	// with making any scheduling decision off of our state nodes. Otherwise, we have the potential to make
 	// a scheduling decision based on a smaller subset of nodes in our cluster state than actually exist.
 	if !p.cluster.Synced(ctx) {
 		log.FromContext(ctx).V(1).Info("waiting on cluster sync")
-		return reconcile.Result{RequeueAfter: singleton.RequeueImmediately}, nil
+		return reconcile.Result{RequeueAfter: time.Second}, nil
 	}
-
 
 	// Schedule pods to potential nodes, exit if nothing to do
 	results, err := p.Schedule(ctx)
@@ -133,17 +128,15 @@ func (p *Provisioner) Reconcile(ctx context.Context) (result reconcile.Result, e
 		return reconcile.Result{}, err
 	}
 	if len(results.NewNodeClaims) == 0 {
-		return reconcile.Result{RequeueAfter: singleton.RequeueImmediately}, nil
+		return reconcile.Result{}, nil
 	}
-	if _, err = p.CreateNodeClaims(ctx, results.NewNodeClaims, WithReason(metrics.ProvisionedReason), RecordPodNomination); err != nil {
-		return reconcile.Result{}, err
-	}
-	return reconcile.Result{RequeueAfter: singleton.RequeueImmediately}, nil
+	_, err = p.CreateNodeClaims(ctx, results.NewNodeClaims, WithReason(metrics.ProvisioningReason), RecordPodNomination)
+	return reconcile.Result{}, err
 }
 
 // CreateNodeClaims launches nodes passed into the function in parallel. It returns a slice of the successfully created node
 // names as well as a multierr of any errors that occurred while launching nodes
-func (p *Provisioner) CreateNodeClaims(ctx context.Context, nodeClaims []*scheduler.NodeClaim, opts ...option.Function[LaunchOptions]) ([]string, error) {
+func (p *Provisioner) CreateNodeClaims(ctx context.Context, nodeClaims []*scheduler.NodeClaim, opts ...functional.Option[LaunchOptions]) ([]string, error) {
 	// Create capacity and bind pods
 	errs := make([]error, len(nodeClaims))
 	nodeClaimNames := make([]string, len(nodeClaims))
@@ -158,70 +151,56 @@ func (p *Provisioner) CreateNodeClaims(ctx context.Context, nodeClaims []*schedu
 	return nodeClaimNames, multierr.Combine(errs...)
 }
 
-func (p *Provisioner) GetPendingPods(ctx context.Context) ([]*corev1.Pod, error) {
+func (p *Provisioner) GetPendingPods(ctx context.Context) ([]*v1.Pod, error) {
 	// filter for provisionable pods first, so we don't check for validity/PVCs on pods we won't provision anyway
 	// (e.g. those owned by daemonsets)
 	pods, err := nodeutil.GetProvisionablePods(ctx, p.kubeClient)
 	if err != nil {
 		return nil, fmt.Errorf("listing pods, %w", err)
 	}
-	pods = lo.Reject(pods, func(po *corev1.Pod, _ int) bool {
+	return lo.Reject(pods, func(po *v1.Pod, _ int) bool {
 		if err := p.Validate(ctx, po); err != nil {
 			log.FromContext(ctx).WithValues("Pod", klog.KRef(po.Namespace, po.Name)).V(1).Info(fmt.Sprintf("ignoring pod, %s", err))
 			return true
 		}
+		p.consolidationWarnings(ctx, po)
 		return false
-	})
-	p.consolidationWarnings(ctx, pods)
-	return pods, nil
+	}), nil
 }
 
-// consolidationWarnings potentially writes logs warning about possible unexpected interactions
-// between scheduling constraints and consolidation
-func (p *Provisioner) consolidationWarnings(ctx context.Context, pods []*corev1.Pod) {
+// consolidationWarnings potentially writes logs warning about possible unexpected interactions between scheduling
+// constraints and consolidation
+func (p *Provisioner) consolidationWarnings(ctx context.Context, po *v1.Pod) {
 	// We have pending pods that have preferred anti-affinity or topology spread constraints.  These can interact
-	// unexpectedly with consolidation, so we warn once per hour when we see these pods.
-	antiAffinityPods := lo.FilterMap(pods, func(po *corev1.Pod, _ int) (client.ObjectKey, bool) {
-		if po.Spec.Affinity != nil && po.Spec.Affinity.PodAntiAffinity != nil {
-			if len(po.Spec.Affinity.PodAntiAffinity.PreferredDuringSchedulingIgnoredDuringExecution) != 0 {
-				if p.cm.HasChanged(string(po.UID), "pod-antiaffinity") {
-					return client.ObjectKeyFromObject(po), true
-				}
+	// unexpectedly with consolidation so we warn once per hour when we see these pods.
+	if po.Spec.Affinity != nil && po.Spec.Affinity.PodAntiAffinity != nil {
+		if len(po.Spec.Affinity.PodAntiAffinity.PreferredDuringSchedulingIgnoredDuringExecution) != 0 {
+			if p.cm.HasChanged(string(po.UID), "pod-antiaffinity") {
+				log.FromContext(ctx).Info(fmt.Sprintf("pod %s has a preferred Anti-Affinity which can prevent consolidation", client.ObjectKeyFromObject(po)))
 			}
 		}
-		return client.ObjectKey{}, false
-	})
-	topologySpreadPods := lo.FilterMap(pods, func(po *corev1.Pod, _ int) (client.ObjectKey, bool) {
-		for _, tsc := range po.Spec.TopologySpreadConstraints {
-			if tsc.WhenUnsatisfiable == corev1.ScheduleAnyway {
-				if p.cm.HasChanged(string(po.UID), "pod-topology-spread") {
-					return client.ObjectKeyFromObject(po), true
-				}
-			}
-		}
-		return client.ObjectKey{}, false
-	})
-	// We reduce the amount of logging that we do per-pod by grouping log lines like this together
-	if len(antiAffinityPods) > 0 {
-		log.FromContext(ctx).WithValues("pods", pretty.Slice(antiAffinityPods, 10)).Info("pod(s) have a preferred Anti-Affinity which can prevent consolidation")
 	}
-	if len(topologySpreadPods) > 0 {
-		log.FromContext(ctx).WithValues("pods", pretty.Slice(topologySpreadPods, 10)).Info("pod(s) have a preferred TopologySpreadConstraint which can prevent consolidation")
+	for _, tsc := range po.Spec.TopologySpreadConstraints {
+		if tsc.WhenUnsatisfiable == v1.ScheduleAnyway {
+			if p.cm.HasChanged(string(po.UID), "pod-topology-spread") {
+				log.FromContext(ctx).Info(fmt.Sprintf("pod %s has a preferred TopologySpreadConstraint which can prevent consolidation", client.ObjectKeyFromObject(po)))
+			}
+		}
 	}
 }
 
 var ErrNodePoolsNotFound = errors.New("no nodepools found")
 
 //nolint:gocyclo
-func (p *Provisioner) NewScheduler(ctx context.Context, pods []*corev1.Pod, stateNodes []*state.StateNode) (*scheduler.Scheduler, error) {
-	nodePoolList := &v1.NodePoolList{}
+func (p *Provisioner) NewScheduler(ctx context.Context, pods []*v1.Pod, stateNodes []*state.StateNode) (*scheduler.Scheduler, error) {
+	nodePoolList := &v1beta1.NodePoolList{}
 	err := p.kubeClient.List(ctx, nodePoolList)
 	if err != nil {
 		return nil, fmt.Errorf("listing node pools, %w", err)
 	}
-	nodePoolList.Items = lo.Filter(nodePoolList.Items, func(n v1.NodePool, _ int) bool {
-		if !n.StatusConditions().IsTrue(status.ConditionReady) {
-			log.FromContext(ctx).WithValues("NodePool", klog.KRef("", n.Name)).Error(err, "nodePool not ready")
+	nodePoolList.Items = lo.Filter(nodePoolList.Items, func(n v1beta1.NodePool, _ int) bool {
+		if err := n.RuntimeValidate(); err != nil {
+			log.FromContext(ctx).WithValues("NodePool", klog.KRef("", n.Name)).Error(err, "nodepool failed validation")
 			return false
 		}
 		return n.DeletionTimestamp.IsZero()
@@ -237,7 +216,6 @@ func (p *Provisioner) NewScheduler(ctx context.Context, pods []*corev1.Pod, stat
 
 	instanceTypes := map[string][]*cloudprovider.InstanceType{}
 	domains := map[string]sets.Set[string]{}
-	var notReadyNodePools []string
 	for _, nodePool := range nodePoolList.Items {
 		// Get instance type options
 		instanceTypeOptions, err := p.cloudProvider.GetInstanceTypes(ctx, lo.ToPtr(nodePool))
@@ -278,7 +256,7 @@ func (p *Provisioner) NewScheduler(ctx context.Context, pods []*corev1.Pod, stat
 		requirements := scheduling.NewNodeSelectorRequirementsWithMinValues(nodePool.Spec.Template.Spec.Requirements...)
 		requirements.Add(scheduling.NewLabelRequirements(nodePool.Spec.Template.Labels).Values()...)
 		for key, requirement := range requirements {
-			if requirement.Operator() == corev1.NodeSelectorOpIn {
+			if requirement.Operator() == v1.NodeSelectorOpIn {
 				// The following is a performance optimisation, for the explanation see the comment above
 				if domains[key] == nil {
 					domains[key] = sets.New(requirement.Values()...)
@@ -288,9 +266,7 @@ func (p *Provisioner) NewScheduler(ctx context.Context, pods []*corev1.Pod, stat
 			}
 		}
 	}
-	if len(notReadyNodePools) > 0 {
-		log.FromContext(ctx).WithValues("nodePools", nodePoolList).Info("skipped nodePools, not ready")
-	}
+
 	// inject topology constraints
 	pods = p.injectVolumeTopologyRequirements(ctx, pods)
 
@@ -303,13 +279,11 @@ func (p *Provisioner) NewScheduler(ctx context.Context, pods []*corev1.Pod, stat
 	if err != nil {
 		return nil, fmt.Errorf("getting daemon pods, %w", err)
 	}
-	return scheduler.NewScheduler(p.kubeClient, lo.ToSlicePtr(nodePoolList.Items), p.cluster, stateNodes, topology, instanceTypes, daemonSetPods, p.recorder), nil
+	return scheduler.NewScheduler(ctx, p.kubeClient, lo.ToSlicePtr(nodePoolList.Items), p.cluster, stateNodes, topology, instanceTypes, daemonSetPods, p.recorder), nil
 }
 
 func (p *Provisioner) Schedule(ctx context.Context) (scheduler.Results, error) {
-	defer metrics.Measure(scheduler.SchedulingDurationSeconds.With(
-		prometheus.Labels{scheduler.ControllerLabel: injection.GetControllerName(ctx)},
-	))()
+	defer metrics.Measure(schedulingDuration)()
 	start := time.Now()
 
 	// We collect the nodes with their used capacities before we get the list of pending pods. This ensures that
@@ -321,7 +295,6 @@ func (p *Provisioner) Schedule(ctx context.Context) (scheduler.Results, error) {
 	// We don't consider the nodes that are MarkedForDeletion since this capacity shouldn't be considered
 	// as persistent capacity for the cluster (since it will soon be removed). Additionally, we are scheduling for
 	// the pods that are on these nodes so the MarkedForDeletion node capacity can't be considered.
-
 	nodes := p.cluster.Nodes()
 
 	// Get pods, exit if nothing to do
@@ -352,16 +325,16 @@ func (p *Provisioner) Schedule(ctx context.Context) (scheduler.Results, error) {
 	}
 	results := s.Solve(ctx, pods).TruncateInstanceTypes(scheduler.MaxInstanceTypes)
 	if len(results.NewNodeClaims) > 0 {
-		log.FromContext(ctx).WithValues("Pods", pretty.Slice(lo.Map(pods, func(p *corev1.Pod, _ int) string { return klog.KRef(p.Namespace, p.Name).String() }), 5), "duration", time.Since(start)).Info("found provisionable pod(s)")
+		log.FromContext(ctx).WithValues("Pods", pretty.Slice(lo.Map(pods, func(p *v1.Pod, _ int) string { return klog.KRef(p.Namespace, p.Name).String() }), 5), "duration", time.Since(start)).Info("found provisionable pod(s)")
 	}
 	results.Record(ctx, p.recorder, p.cluster)
 	return results, nil
 }
 
-func (p *Provisioner) Create(ctx context.Context, n *scheduler.NodeClaim, opts ...option.Function[LaunchOptions]) (string, error) {
+func (p *Provisioner) Create(ctx context.Context, n *scheduler.NodeClaim, opts ...functional.Option[LaunchOptions]) (string, error) {
 	ctx = log.IntoContext(ctx, log.FromContext(ctx).WithValues("NodePool", klog.KRef("", n.NodePoolName)))
-	options := option.Resolve(opts...)
-	latest := &v1.NodePool{}
+	options := functional.ResolveOptions(opts...)
+	latest := &v1beta1.NodePool{}
 	if err := p.kubeClient.Get(ctx, types.NamespacedName{Name: n.NodePoolName}, latest); err != nil {
 		return "", fmt.Errorf("getting current resource usage, %w", err)
 	}
@@ -373,16 +346,16 @@ func (p *Provisioner) Create(ctx context.Context, n *scheduler.NodeClaim, opts .
 	if err := p.kubeClient.Create(ctx, nodeClaim); err != nil {
 		return "", err
 	}
-	instanceTypeRequirement, _ := lo.Find(nodeClaim.Spec.Requirements, func(req v1.NodeSelectorRequirementWithMinValues) bool {
-		return req.Key == corev1.LabelInstanceTypeStable
+	instanceTypeRequirement, _ := lo.Find(nodeClaim.Spec.Requirements, func(req v1beta1.NodeSelectorRequirementWithMinValues) bool {
+		return req.Key == v1.LabelInstanceTypeStable
 	})
 
 	log.FromContext(ctx).WithValues("NodeClaim", klog.KRef("", nodeClaim.Name), "requests", nodeClaim.Spec.Resources.Requests, "instance-types", instanceTypeList(instanceTypeRequirement.Values)).
 		Info("created nodeclaim")
-	metrics.NodeClaimsCreatedTotal.With(prometheus.Labels{
+	metrics.NodeClaimsCreatedCounter.With(prometheus.Labels{
 		metrics.ReasonLabel:       options.Reason,
-		metrics.NodePoolLabel:     nodeClaim.Labels[v1.NodePoolLabelKey],
-		metrics.CapacityTypeLabel: nodeClaim.Labels[v1.CapacityTypeLabelKey],
+		metrics.NodePoolLabel:     nodeClaim.Labels[v1beta1.NodePoolLabelKey],
+		metrics.CapacityTypeLabel: nodeClaim.Labels[v1beta1.CapacityTypeLabelKey],
 	}).Inc()
 	// Update the nodeclaim manually in state to avoid evenutal consistency delay races with our watcher.
 	// This is essential to avoiding races where disruption can create a replacement node, then immediately
@@ -390,7 +363,7 @@ func (p *Provisioner) Create(ctx context.Context, n *scheduler.NodeClaim, opts .
 	// to then trigger cluster state updates. Triggering it manually ensures that Karpenter waits for the
 	// internal cache to sync before moving onto another disruption loop.
 	p.cluster.UpdateNodeClaim(nodeClaim)
-	if option.Resolve(opts...).RecordPodNomination {
+	if functional.ResolveOptions(opts...).RecordPodNomination {
 		for _, pod := range n.Pods {
 			p.recorder.Publish(scheduler.NominatePodEvent(pod, nil, nodeClaim))
 		}
@@ -413,26 +386,26 @@ func instanceTypeList(names []string) string {
 	return itSb.String()
 }
 
-func (p *Provisioner) getDaemonSetPods(ctx context.Context) ([]*corev1.Pod, error) {
+func (p *Provisioner) getDaemonSetPods(ctx context.Context) ([]*v1.Pod, error) {
 	daemonSetList := &appsv1.DaemonSetList{}
 	if err := p.kubeClient.List(ctx, daemonSetList); err != nil {
 		return nil, fmt.Errorf("listing daemonsets, %w", err)
 	}
 
-	return lo.Map(daemonSetList.Items, func(d appsv1.DaemonSet, _ int) *corev1.Pod {
+	return lo.Map(daemonSetList.Items, func(d appsv1.DaemonSet, _ int) *v1.Pod {
 		pod := p.cluster.GetDaemonSetPod(&d)
 		if pod == nil {
-			pod = &corev1.Pod{Spec: d.Spec.Template.Spec}
+			pod = &v1.Pod{Spec: d.Spec.Template.Spec}
 		}
 		// Replacing retrieved pod affinity with daemonset pod template required node affinity since this is overridden
 		// by the daemonset controller during pod creation
 		// https://github.com/kubernetes/kubernetes/blob/c5cf0ac1889f55ab51749798bec684aed876709d/pkg/controller/daemon/util/daemonset_util.go#L176
 		if d.Spec.Template.Spec.Affinity != nil && d.Spec.Template.Spec.Affinity.NodeAffinity != nil && d.Spec.Template.Spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution != nil {
 			if pod.Spec.Affinity == nil {
-				pod.Spec.Affinity = &corev1.Affinity{}
+				pod.Spec.Affinity = &v1.Affinity{}
 			}
 			if pod.Spec.Affinity.NodeAffinity == nil {
-				pod.Spec.Affinity.NodeAffinity = &corev1.NodeAffinity{}
+				pod.Spec.Affinity.NodeAffinity = &v1.NodeAffinity{}
 			}
 			pod.Spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution = d.Spec.Template.Spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution
 		}
@@ -440,7 +413,7 @@ func (p *Provisioner) getDaemonSetPods(ctx context.Context) ([]*corev1.Pod, erro
 	}), nil
 }
 
-func (p *Provisioner) Validate(ctx context.Context, pod *corev1.Pod) error {
+func (p *Provisioner) Validate(ctx context.Context, pod *v1.Pod) error {
 	return multierr.Combine(
 		validateKarpenterManagedLabelCanExist(pod),
 		validateNodeSelector(pod),
@@ -451,18 +424,18 @@ func (p *Provisioner) Validate(ctx context.Context, pod *corev1.Pod) error {
 
 // validateKarpenterManagedLabelCanExist provides a more clear error message in the event of scheduling a pod that specifically doesn't
 // want to run on a Karpenter node (e.g. a Karpenter controller replica).
-func validateKarpenterManagedLabelCanExist(p *corev1.Pod) error {
+func validateKarpenterManagedLabelCanExist(p *v1.Pod) error {
 	for _, req := range scheduling.NewPodRequirements(p) {
-		if req.Key == v1.NodePoolLabelKey && req.Operator() == corev1.NodeSelectorOpDoesNotExist {
+		if req.Key == v1beta1.NodePoolLabelKey && req.Operator() == v1.NodeSelectorOpDoesNotExist {
 			return fmt.Errorf("configured to not run on a Karpenter provisioned node via the %s %s requirement",
-				v1.NodePoolLabelKey, corev1.NodeSelectorOpDoesNotExist)
+				v1beta1.NodePoolLabelKey, v1.NodeSelectorOpDoesNotExist)
 		}
 	}
 	return nil
 }
 
-func (p *Provisioner) injectVolumeTopologyRequirements(ctx context.Context, pods []*corev1.Pod) []*corev1.Pod {
-	var schedulablePods []*corev1.Pod
+func (p *Provisioner) injectVolumeTopologyRequirements(ctx context.Context, pods []*v1.Pod) []*v1.Pod {
+	var schedulablePods []*v1.Pod
 	for _, pod := range pods {
 		if err := p.volumeTopology.Inject(ctx, pod); err != nil {
 			log.FromContext(ctx).WithValues("Pod", klog.KRef(pod.Namespace, pod.Name)).Error(err, "failed getting volume topology requirements")
@@ -473,13 +446,13 @@ func (p *Provisioner) injectVolumeTopologyRequirements(ctx context.Context, pods
 	return schedulablePods
 }
 
-func validateNodeSelector(p *corev1.Pod) (errs error) {
-	terms := lo.MapToSlice(p.Spec.NodeSelector, func(k string, v string) corev1.NodeSelectorTerm {
-		return corev1.NodeSelectorTerm{
-			MatchExpressions: []corev1.NodeSelectorRequirement{
+func validateNodeSelector(p *v1.Pod) (errs error) {
+	terms := lo.MapToSlice(p.Spec.NodeSelector, func(k string, v string) v1.NodeSelectorTerm {
+		return v1.NodeSelectorTerm{
+			MatchExpressions: []v1.NodeSelectorRequirement{
 				{
 					Key:      k,
-					Operator: corev1.NodeSelectorOpIn,
+					Operator: v1.NodeSelectorOpIn,
 					Values:   []string{v},
 				},
 			},
@@ -491,7 +464,7 @@ func validateNodeSelector(p *corev1.Pod) (errs error) {
 	return errs
 }
 
-func validateAffinity(p *corev1.Pod) (errs error) {
+func validateAffinity(p *v1.Pod) (errs error) {
 	if p.Spec.Affinity == nil {
 		return nil
 	}
@@ -508,13 +481,13 @@ func validateAffinity(p *corev1.Pod) (errs error) {
 	return errs
 }
 
-func validateNodeSelectorTerm(term corev1.NodeSelectorTerm) (errs error) {
+func validateNodeSelectorTerm(term v1.NodeSelectorTerm) (errs error) {
 	if term.MatchFields != nil {
 		errs = multierr.Append(errs, fmt.Errorf("node selector term with matchFields is not supported"))
 	}
 	if term.MatchExpressions != nil {
 		for _, requirement := range term.MatchExpressions {
-			errs = multierr.Append(errs, v1.ValidateRequirement(v1.NodeSelectorRequirementWithMinValues{
+			errs = multierr.Append(errs, v1beta1.ValidateRequirement(v1beta1.NodeSelectorRequirementWithMinValues{
 				NodeSelectorRequirement: requirement,
 			}))
 		}

@@ -32,7 +32,7 @@ Install these tools before proceeding:
 
 1. [AWS CLI](https://docs.aws.amazon.com/cli/latest/userguide/install-cliv2-linux.html)
 2. `kubectl` - [the Kubernetes CLI](https://kubernetes.io/docs/tasks/tools/install-kubectl-linux/)
-3. `eksctl` (>= v0.180.0) - [the CLI for AWS EKS](https://docs.aws.amazon.com/eks/latest/userguide/eksctl.html)
+3. `eksctl` (>= v0.169.0) - [the CLI for AWS EKS](https://docs.aws.amazon.com/eks/latest/userguide/eksctl.html)
 4. `helm` - [the package manager for Kubernetes](https://helm.sh/docs/intro/install/)
 
 [Configure the AWS CLI](https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-quickstart.html)
@@ -45,8 +45,8 @@ After setting up the tools, set the Karpenter and Kubernetes version:
 
 ```bash
 export KARPENTER_NAMESPACE="kube-system"
-export KARPENTER_VERSION="0.37.0"
-export K8S_VERSION="1.30"
+export KARPENTER_VERSION="0.36.2"
+export K8S_VERSION="1.29"
 ```
 
 Then set the following environment variable:
@@ -87,10 +87,17 @@ The following cluster configuration will:
   {{% /tab %}}
 {{< /tabpane >}}
 
-Unless your AWS account has already onboarded to EC2 Spot, you will need to create the service linked role to
-avoid the [`ServiceLinkedRoleCreationNotPermitted` error]({{<ref "../../troubleshooting/#missing-service-linked-role" >}}).
-
 {{% script file="./content/en/{VERSION}/getting-started/getting-started-with-karpenter/scripts/step06-add-spot-role.sh" language="bash"%}}
+
+{{% alert title="EKSCTL Breaking Change" color="warning" %}}
+Starting with `eksctl` v1.77.0, a service account is created for each podIdentityAssociation.
+This default service account is incompatible with the Karpenter Helm chart, and it will need to be removed to proceed with installation.
+If you're on an affected version of `eksctl` and you created a cluster with a `podIdentityAssociation`, run the following command before proceeding with the rest of the installation.
+This has been identified as a breaking change in `eksctl` which will be addressed in a future release ([GitHub Issue](https://github.com/eksctl-io/eksctl/issues/7775)).
+```bash
+kubectl delete sa -n ${KARPENTER_NAMESPACE} karpenter
+```
+{{% /alert %}}
 
 {{% alert title="Windows Support Notice" color="warning" %}}
 In order to run Windows workloads, Windows support should be enabled in your EKS Cluster.
@@ -112,13 +119,13 @@ See [Enabling Windows support](https://docs.aws.amazon.com/eks/latest/userguide/
 As the OCI Helm chart is signed by [Cosign](https://github.com/sigstore/cosign) as part of the release process you can verify the chart before installing it by running the following command.
 
 ```bash
-cosign verify public.ecr.aws/karpenter/karpenter:0.37.0 \
+cosign verify public.ecr.aws/karpenter/karpenter:0.36.2 \
   --certificate-oidc-issuer=https://token.actions.githubusercontent.com \
   --certificate-identity-regexp='https://github\.com/aws/karpenter-provider-aws/\.github/workflows/release\.yaml@.+' \
   --certificate-github-workflow-repository=aws/karpenter-provider-aws \
   --certificate-github-workflow-name=Release \
-  --certificate-github-workflow-ref=refs/tags/v0.37.0 \
-  --annotations version=0.37.0
+  --certificate-github-workflow-ref=refs/tags/v0.36.2 \
+  --annotations version=0.36.2
 ```
 
 {{% alert title="DNS Policy Notice" color="warning" %}}

@@ -81,9 +81,9 @@ spec:
               value: "{{ .Values.webhook.port }}"
             - name: WEBHOOK_METRICS_PORT
               value: "{{ .Values.webhook.metrics.port }}"
-          {{- end }}
             - name: DISABLE_WEBHOOK
-              value: "{{ not .Values.webhook.enabled }}"
+              value: "false"
+          {{- end }}
           {{- with .Values.logLevel }}
             - name: LOG_LEVEL
               value: "{{ . }}"
@@ -103,13 +103,21 @@ spec:
                   divisor: "0"
                   resource: limits.memory
             - name: FEATURE_GATES
-              value: "SpotToSpotConsolidation={{ .Values.settings.featureGates.spotToSpotConsolidation }}"
+              value: "Drift={{ .Values.settings.featureGates.drift }},SpotToSpotConsolidation={{ .Values.settings.featureGates.spotToSpotConsolidation }}"
           {{- with .Values.settings.batchMaxDuration }}
             - name: BATCH_MAX_DURATION
               value: "{{ . }}"
           {{- end }}
           {{- with .Values.settings.batchIdleDuration }}
             - name: BATCH_IDLE_DURATION
+              value: "{{ . }}"
+          {{- end }}
+          {{- with .Values.settings.assumeRoleARN }}
+            - name: ASSUME_ROLE_ARN
+              value: "{{ . }}"
+          {{- end }}
+          {{- with .Values.settings.assumeRoleDuration }}
+            - name: ASSUME_ROLE_DURATION
               value: "{{ . }}"
           {{- end }}
           {{- with .Values.settings.clusterCABundle }}
@@ -178,8 +186,12 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-        {{- if .Values.controller.extraVolumeMounts }}
+        {{- if or (.Values.logConfig.enabled) (.Values.controller.extraVolumeMounts) }}
           volumeMounts:
+          {{- if .Values.logConfig.enabled }}
+            - name: config-logging
+              mountPath: /etc/karpenter/logging
+          {{- end }}
           {{- with .Values.controller.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
           {{- end }}
@@ -216,8 +228,13 @@ spec:
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-    {{- if .Values.extraVolumes }}
+    {{- if or (.Values.logConfig.enabled) (.Values.extraVolumes) }}
       volumes:
+      {{- if .Values.logConfig.enabled }}
+        - name: config-logging
+          configMap:
+            name: config-logging
+      {{- end }}
       {{- with .Values.extraVolumes }}
         {{- toYaml . | nindent 8 }}
       {{- end }}

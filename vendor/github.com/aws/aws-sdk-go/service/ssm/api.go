@@ -36609,11 +36609,7 @@ type InstanceInformation struct {
 	ComputerName *string `min:"1" type:"string"`
 
 	// The IP address of the managed node.
-	//
-	// IPAddress is a sensitive parameter and its value will be
-	// replaced with "sensitive" in string returned by InstanceInformation's
-	// String and GoString methods.
-	IPAddress *string `min:"1" type:"string" sensitive:"true"`
+	IPAddress *string `min:"1" type:"string"`
 
 	// The Identity and Access Management (IAM) role assigned to the on-premises
 	// Systems Manager managed node. This call doesn't return the IAM role for Amazon
@@ -37407,11 +37403,7 @@ type InstanceProperty struct {
 
 	// The public IPv4 address assigned to the node. If a public IPv4 address isn't
 	// assigned to the node, this value is blank.
-	//
-	// IPAddress is a sensitive parameter and its value will be
-	// replaced with "sensitive" in string returned by InstanceProperty's
-	// String and GoString methods.
-	IPAddress *string `min:"1" type:"string" sensitive:"true"`
+	IPAddress *string `min:"1" type:"string"`
 
 	// The IAM role used in the hybrid activation to register the node with Systems
 	// Manager.

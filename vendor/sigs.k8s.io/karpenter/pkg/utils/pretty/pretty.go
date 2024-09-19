@@ -21,9 +21,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-
-	"golang.org/x/exp/constraints"
-	"golang.org/x/exp/slices"
 )
 
 func Concise(o interface{}) string {
@@ -52,28 +49,16 @@ func Slice[T any](s []T, maxItems int) string {
 
 // Map truncates a map after a certain number of max items to ensure that the
 // description in a log doesn't get too long
-func Map[K constraints.Ordered, V any](values map[K]V, maxItems int) string {
+func Map[K comparable, V any](values map[K]V, maxItems int) string {
 	var buf bytes.Buffer
-	count := 0
-	var keys []K
-	for k := range values {
-		keys = append(keys, k)
-	}
-	slices.Sort(keys)
-	for _, k := range keys {
-		v := values[k]
-		count++
-		if buf.Len() > 0 {
-			fmt.Fprintf(&buf, ", ")
-		}
-		fmt.Fprintf(&buf, "%v: %v", k, v)
-		if count >= maxItems {
+	for k, v := range values {
+		fmt.Fprintf(&buf, "%v: %v ", k, v)
+		if buf.Len() > maxItems {
 			break
 		}
-
 	}
-	if count < len(values) {
-		fmt.Fprintf(&buf, " and %d other(s)", len(values)-count)
+	if maxItems < buf.Len() {
+		fmt.Fprintf(&buf, "and %d other(s)", buf.Len()-maxItems)
 	}
 	return buf.String()
 }

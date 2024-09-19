@@ -68,7 +68,7 @@ type Disruption struct {
 	// +required
 	ConsolidateAfter NillableDuration `json:"consolidateAfter"`
 	// ConsolidationPolicy describes which nodes Karpenter can disrupt through its consolidation
-	// algorithm. This policy defaults to "WhenEmptyOrUnderutilized" if not specified
+	// algorithm. This policy defaults to "WhenUnderutilized" if not specified
 	// +kubebuilder:default:="WhenEmptyOrUnderutilized"
 	// +kubebuilder:validation:Enum:={WhenEmpty,WhenEmptyOrUnderutilized}
 	// +optional
@@ -139,7 +139,7 @@ const (
 )
 
 var (
-	// WellKnownDisruptionReasons is a list of all valid reasons for disruption budgets.
+	// DisruptionReasons is a list of all valid reasons for disruption budgets.
 	WellKnownDisruptionReasons = []DisruptionReason{DisruptionReasonUnderutilized, DisruptionReasonEmpty, DisruptionReasonDrifted}
 )
 
@@ -253,7 +253,6 @@ type ObjectMeta struct {
 
 // NodePool is the Schema for the NodePools API
 // +kubebuilder:object:root=true
-// +kubebuilder:storageversion
 // +kubebuilder:resource:path=nodepools,scope=Cluster,categories=karpenter
 // +kubebuilder:printcolumn:name="NodeClass",type="string",JSONPath=".spec.template.spec.nodeClassRef.name",description=""
 // +kubebuilder:printcolumn:name="Nodes",type="string",JSONPath=".status.resources.nodes",description=""
@@ -336,8 +335,7 @@ func (in *NodePool) GetAllowedDisruptionsByReason(ctx context.Context, c clock.C
 			multiErr = multierr.Append(multiErr, err)
 		}
 		// If reasons is nil, it applies to all well known disruption reasons
-		a := lo.Ternary(budget.Reasons == nil, WellKnownDisruptionReasons, budget.Reasons)
-		for _, reason := range a {
+		for _, reason := range lo.Ternary(budget.Reasons == nil, WellKnownDisruptionReasons, budget.Reasons) {
 			allowedDisruptions[reason] = lo.Min([]int{allowedDisruptions[reason], val})
 		}
 	}

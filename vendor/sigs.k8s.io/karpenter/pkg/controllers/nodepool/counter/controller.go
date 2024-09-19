@@ -18,10 +18,8 @@ package counter
 
 import (
 	"context"
-	"fmt"
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/types"
@@ -30,9 +28,11 @@ import (
 
 	"sigs.k8s.io/karpenter/pkg/operator/injection"
 
-	v1 "sigs.k8s.io/karpenter/pkg/apis/v1"
+	"sigs.k8s.io/karpenter/pkg/apis/v1beta1"
 	"sigs.k8s.io/karpenter/pkg/controllers/state"
+	"sigs.k8s.io/karpenter/pkg/utils/functional"
 
+	v1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
@@ -47,16 +47,6 @@ type Controller struct {
 	cluster    *state.Cluster
 }
 
-var ResourceNode = corev1.ResourceName("nodes")
-
-var BaseResources = corev1.ResourceList{
-	corev1.ResourceCPU:              resource.MustParse("0"),
-	corev1.ResourceMemory:           resource.MustParse("0"),
-	corev1.ResourcePods:             resource.MustParse("0"),
-	corev1.ResourceEphemeralStorage: resource.MustParse("0"),
-	ResourceNode:                    resource.MustParse("0"),
-}
-
 // NewController is a constructor
 func NewController(kubeClient client.Client, cluster *state.Cluster) *Controller {
 	return &Controller{
@@ -66,7 +56,7 @@ func NewController(kubeClient client.Client, cluster *state.Cluster) *Controller
 }
 
 // Reconcile a control loop for the resource
-func (c *Controller) Reconcile(ctx context.Context, nodePool *v1.NodePool) (reconcile.Result, error) {
+func (c *Controller) Reconcile(ctx context.Context, nodePool *v1beta1.NodePool) (reconcile.Result, error) {
 	ctx = injection.WithControllerName(ctx, "nodepool.counter")
 
 	// We need to ensure that our internal cluster state mechanism is synced before we proceed
@@ -77,7 +67,7 @@ func (c *Controller) Reconcile(ctx context.Context, nodePool *v1.NodePool) (reco
 	}
 	stored := nodePool.DeepCopy()
 	// Determine resource usage and update nodepool.status.resources
-	nodePool.Status.Resources = c.resourceCountsFor(v1.NodePoolLabelKey, nodePool.Name)
+	nodePool.Status.Resources = c.resourceCountsFor(v1beta1.NodePoolLabelKey, nodePool.Name)
 	if !equality.Semantic.DeepEqual(stored, nodePool) {
 		if err := c.kubeClient.Status().Patch(ctx, nodePool, client.MergeFrom(stored)); err != nil {
 			return reconcile.Result{}, client.IgnoreNotFound(err)
@@ -86,9 +76,8 @@ func (c *Controller) Reconcile(ctx context.Context, nodePool *v1.NodePool) (reco
 	return reconcile.Result{}, nil
 }
 
-func (c *Controller) resourceCountsFor(ownerLabel string, ownerName string) corev1.ResourceList {
-	res := BaseResources.DeepCopy()
-	nodeCount := 0
+func (c *Controller) resourceCountsFor(ownerLabel string, ownerName string) v1.ResourceList {
+	var res v1.ResourceList
 	// Record all resources provisioned by the nodepools, we look at the cluster state nodes as their capacity
 	// is accurately reported even for nodes that haven't fully started yet. This allows us to update our nodepool
 	// status immediately upon node creation instead of waiting for the node to become ready.
@@ -100,31 +89,29 @@ func (c *Controller) resourceCountsFor(ownerLabel string, ownerName string) core
 		}
 		if n.Labels()[ownerLabel] == ownerName {
 			res = resources.MergeInto(res, n.Capacity())
-			nodeCount += 1
 		}
 		return true
 	})
-	res[ResourceNode] = resource.MustParse(fmt.Sprintf("%d", nodeCount))
-	return res
+	return functional.FilterMap(res, func(_ v1.ResourceName, v resource.Quantity) bool { return !v.IsZero() })
 }
 
 func (c *Controller) Register(_ context.Context, m manager.Manager) error {
 	return controllerruntime.NewControllerManagedBy(m).
 		Named("nodepool.counter").
-		For(&v1.NodePool{}).
+		For(&v1beta1.NodePool{}).
 		Watches(
-			&v1.NodeClaim{},
+			&v1beta1.NodeClaim{},
 			handler.EnqueueRequestsFromMapFunc(func(_ context.Context, o client.Object) []reconcile.Request {
-				if name, ok := o.GetLabels()[v1.NodePoolLabelKey]; ok {
+				if name, ok := o.GetLabels()[v1beta1.NodePoolLabelKey]; ok {
 					return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: name}}}
 				}
 				return nil
 			}),
 		).
 		Watches(
-			&corev1.Node{},
+			&v1.Node{},
 			handler.EnqueueRequestsFromMapFunc(func(_ context.Context, o client.Object) []reconcile.Request {
-				if name, ok := o.GetLabels()[v1.NodePoolLabelKey]; ok {
+				if name, ok := o.GetLabels()[v1beta1.NodePoolLabelKey]; ok {
 					return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: name}}}
 				}
 				return nil

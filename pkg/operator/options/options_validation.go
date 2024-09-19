@@ -17,6 +17,7 @@ package options
 import (
 	"fmt"
 	"net/url"
+	"time"
 
 	"go.uber.org/multierr"
 )
@@ -25,9 +26,17 @@ func (o Options) Validate() error {
 	return multierr.Combine(
 		o.validateEndpoint(),
 		o.validateVMMemoryOverheadPercent(),
+		o.validateAssumeRoleDuration(),
 		o.validateReservedENIs(),
 		o.validateRequiredFields(),
 	)
+}
+
+func (o Options) validateAssumeRoleDuration() error {
+	if o.AssumeRoleDuration < time.Minute*15 {
+		return fmt.Errorf("assume-role-duration cannot be less than 15 minutes")
+	}
+	return nil
 }
 
 func (o Options) validateEndpoint() error {

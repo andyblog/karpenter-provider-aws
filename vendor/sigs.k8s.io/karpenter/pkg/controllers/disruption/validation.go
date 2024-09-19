@@ -26,7 +26,8 @@ import (
 	"k8s.io/utils/clock"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	v1 "sigs.k8s.io/karpenter/pkg/apis/v1"
+	"sigs.k8s.io/karpenter/pkg/apis/v1alpha5"
+	"sigs.k8s.io/karpenter/pkg/apis/v1beta1"
 	"sigs.k8s.io/karpenter/pkg/cloudprovider"
 	"sigs.k8s.io/karpenter/pkg/controllers/disruption/orchestration"
 	"sigs.k8s.io/karpenter/pkg/controllers/provisioning"
@@ -63,11 +64,10 @@ type Validation struct {
 	once          sync.Once
 	recorder      events.Recorder
 	queue         *orchestration.Queue
-	reason        v1.DisruptionReason
 }
 
 func NewValidation(clk clock.Clock, cluster *state.Cluster, kubeClient client.Client, provisioner *provisioning.Provisioner,
-	cp cloudprovider.CloudProvider, recorder events.Recorder, queue *orchestration.Queue, reason v1.DisruptionReason) *Validation {
+	cp cloudprovider.CloudProvider, recorder events.Recorder, queue *orchestration.Queue) *Validation {
 	return &Validation{
 		clock:         clk,
 		cluster:       cluster,
@@ -76,7 +76,6 @@ func NewValidation(clk clock.Clock, cluster *state.Cluster, kubeClient client.Cl
 		cloudProvider: cp,
 		recorder:      recorder,
 		queue:         queue,
-		reason:        reason,
 	}
 }
 
@@ -118,8 +117,7 @@ func (v *Validation) IsValid(ctx context.Context, cmd Command, validationPeriod 
 //
 // If these conditions are met for all candidates, ValidateCandidates returns a slice with the updated representations.
 func (v *Validation) ValidateCandidates(ctx context.Context, candidates ...*Candidate) ([]*Candidate, error) {
-	// GracefulDisruptionClass is hardcoded here because ValidateCandidates is only used for consolidation disruption. All consolidation disruption is graceful disruption.
-	validatedCandidates, err := GetCandidates(ctx, v.cluster, v.kubeClient, v.recorder, v.clock, v.cloudProvider, v.ShouldDisrupt, GracefulDisruptionClass, v.queue)
+	validatedCandidates, err := GetCandidates(ctx, v.cluster, v.kubeClient, v.recorder, v.clock, v.cloudProvider, v.ShouldDisrupt, v.queue)
 	if err != nil {
 		return nil, fmt.Errorf("constructing validation candidates, %w", err)
 	}
@@ -139,17 +137,21 @@ func (v *Validation) ValidateCandidates(ctx context.Context, candidates ...*Cand
 		if v.cluster.IsNodeNominated(vc.ProviderID()) {
 			return nil, NewValidationError(fmt.Errorf("a candidate was nominated during validation"))
 		}
-		if disruptionBudgetMapping[vc.nodePool.Name][v.reason] == 0 {
+		if disruptionBudgetMapping[vc.nodePool.Name] == 0 {
 			return nil, NewValidationError(fmt.Errorf("a candidate can no longer be disrupted without violating budgets"))
 		}
-		disruptionBudgetMapping[vc.nodePool.Name][v.reason]--
+		disruptionBudgetMapping[vc.nodePool.Name]--
 	}
 	return validatedCandidates, nil
 }
 
 // ShouldDisrupt is a predicate used to filter candidates
 func (v *Validation) ShouldDisrupt(_ context.Context, c *Candidate) bool {
-	return c.nodePool.Spec.Disruption.ConsolidateAfter.Duration != nil && c.NodeClaim.StatusConditions().Get(v1.ConditionTypeConsolidatable).IsTrue()
+	// TODO Remove checking do-not-consolidate as part of v1
+	if c.Annotations()[v1alpha5.DoNotConsolidateNodeAnnotationKey] == "true" {
+		return false
+	}
+	return c.nodePool.Spec.Disruption.ConsolidationPolicy == v1beta1.ConsolidationPolicyWhenUnderutilized
 }
 
 // ValidateCommand validates a command for a Method
@@ -163,7 +165,7 @@ func (v *Validation) ValidateCommand(ctx context.Context, cmd Command, candidate
 		return fmt.Errorf("simluating scheduling, %w", err)
 	}
 	if !results.AllNonPendingPodsScheduled() {
-		return NewValidationError(fmt.Errorf(results.NonPendingPodSchedulingErrors()))
+		return NewValidationError(errors.New(results.NonPendingPodSchedulingErrors()))
 	}
 
 	// We want to ensure that the re-simulated scheduling using the current cluster state produces the same result.

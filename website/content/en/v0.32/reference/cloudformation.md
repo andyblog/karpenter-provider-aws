@@ -357,7 +357,7 @@ Also, `karpenter.k8s.aws/ec2nodeclass` must be set to some value. This ensures t
 {
   "Sid": "AllowScopedInstanceProfileCreationActions",
   "Effect": "Allow",
-  "Resource": "arn:${AWS::Partition}:iam::${AWS::AccountId}:instance-profile/*",
+  "Resource": "*",
   "Action": [
     "iam:CreateInstanceProfile"
   ],
@@ -382,7 +382,7 @@ Also, `karpenter.k8s.aws/ec2nodeclass` must be set to some value. This ensures t
 {
   "Sid": "AllowScopedInstanceProfileTagActions",
   "Effect": "Allow",
-  "Resource": "arn:${AWS::Partition}:iam::${AWS::AccountId}:instance-profile/*",
+  "Resource": "*",
   "Action": [
     "iam:TagInstanceProfile"
   ],
@@ -412,7 +412,7 @@ Also, `karpenter.k8s.aws/ec2nodeclass` must be set to some value. This permissio
 {
   "Sid": "AllowScopedInstanceProfileActions",
   "Effect": "Allow",
-  "Resource": "arn:${AWS::Partition}:iam::${AWS::AccountId}:instance-profile/*",
+  "Resource": "*",
   "Action": [
     "iam:AddRoleToInstanceProfile",
     "iam:RemoveRoleFromInstanceProfile",
@@ -438,7 +438,7 @@ The AllowInstanceProfileActions Sid gives the Karpenter controller permission to
 {
   "Sid": "AllowInstanceProfileReadActions",
   "Effect": "Allow",
-  "Resource": "arn:${AWS::Partition}:iam::${AWS::AccountId}:instance-profile/*",
+  "Resource": "*",
   "Action": "iam:GetInstanceProfile"
 }
 ```
@@ -499,7 +499,6 @@ KarpenterInterruptionQueue:
 
 The Karpenter interruption queue policy is created to allow AWS services that we want to receive instance notifications from to push notification messages to the queue.
 The [AWS::SQS::QueuePolicy](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-sqs-queuepolicy.html) resource here applies `EC2InterruptionPolicy` to the `KarpenterInterruptionQueue`. The policy allows [sqs:SendMessage](https://docs.aws.amazon.com/AWSSimpleQueueService/latest/APIReference/API_SendMessage.html) actions to `events.amazonaws.com` and `sqs.amazonaws.com` services. It also allows the `GetAtt` function to get attributes from `KarpenterInterruptionQueue.Arn`.
-Additionally, it only allows access to the queue using encrypted connections over HTTPS (TLS) to adhere to [Amazon SQS Security Best Practices](https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-security-best-practices.html#enforce-encryption-data-in-transit).
 
 ```yaml
 KarpenterInterruptionQueuePolicy:
@@ -517,14 +516,6 @@ KarpenterInterruptionQueuePolicy:
               - sqs.amazonaws.com
           Action: sqs:SendMessage
           Resource: !GetAtt KarpenterInterruptionQueue.Arn
-        - Sid: DenyHTTP
-          Effect: Deny
-          Action: sqs:*
-          Resource: !GetAtt KarpenterInterruptionQueue.Arn
-          Condition:
-            Bool:
-              aws:SecureTransport: false
-          Principal: "*"
 ```
 
 ### Rules

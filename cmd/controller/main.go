@@ -24,6 +24,7 @@ import (
 
 	"sigs.k8s.io/karpenter/pkg/cloudprovider/metrics"
 	corecontrollers "sigs.k8s.io/karpenter/pkg/controllers"
+	"sigs.k8s.io/karpenter/pkg/controllers/state"
 	coreoperator "sigs.k8s.io/karpenter/pkg/operator"
 	corewebhooks "sigs.k8s.io/karpenter/pkg/webhooks"
 )
@@ -44,16 +45,15 @@ func main() {
 
 	op.
 		WithControllers(ctx, corecontrollers.NewControllers(
-			op.Manager,
 			op.Clock,
 			op.GetClient(),
+			state.NewCluster(op.Clock, op.GetClient(), cloudProvider),
 			op.EventRecorder,
 			cloudProvider,
 		)...).
 		WithWebhooks(ctx, corewebhooks.NewWebhooks()...).
 		WithControllers(ctx, controllers.NewControllers(
 			ctx,
-			op.Manager,
 			op.Session,
 			op.Clock,
 			op.GetClient(),
@@ -70,5 +70,5 @@ func main() {
 			op.InstanceTypesProvider,
 		)...).
 		WithWebhooks(ctx, webhooks.NewWebhooks()...).
-		Start(ctx, cloudProvider)
+		Start(ctx, awsCloudProvider)
 }

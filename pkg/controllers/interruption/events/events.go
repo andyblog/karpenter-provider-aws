@@ -15,16 +15,16 @@ limitations under the License.
 package events
 
 import (
-	corev1 "k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 
-	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
+	"sigs.k8s.io/karpenter/pkg/apis/v1beta1"
 	"sigs.k8s.io/karpenter/pkg/events"
 )
 
-func SpotInterrupted(node *corev1.Node, nodeClaim *karpv1.NodeClaim) (evts []events.Event) {
+func SpotInterrupted(node *v1.Node, nodeClaim *v1beta1.NodeClaim) (evts []events.Event) {
 	evts = append(evts, events.Event{
 		InvolvedObject: nodeClaim,
-		Type:           corev1.EventTypeWarning,
+		Type:           v1.EventTypeWarning,
 		Reason:         "SpotInterrupted",
 		Message:        "Spot interruption warning was triggered",
 		DedupeValues:   []string{string(nodeClaim.UID)},
@@ -32,7 +32,7 @@ func SpotInterrupted(node *corev1.Node, nodeClaim *karpv1.NodeClaim) (evts []eve
 	if node != nil {
 		evts = append(evts, events.Event{
 			InvolvedObject: node,
-			Type:           corev1.EventTypeWarning,
+			Type:           v1.EventTypeWarning,
 			Reason:         "SpotInterrupted",
 			Message:        "Spot interruption warning was triggered",
 			DedupeValues:   []string{string(node.UID)},
@@ -41,10 +41,10 @@ func SpotInterrupted(node *corev1.Node, nodeClaim *karpv1.NodeClaim) (evts []eve
 	return evts
 }
 
-func RebalanceRecommendation(node *corev1.Node, nodeClaim *karpv1.NodeClaim) (evts []events.Event) {
+func RebalanceRecommendation(node *v1.Node, nodeClaim *v1beta1.NodeClaim) (evts []events.Event) {
 	evts = append(evts, events.Event{
 		InvolvedObject: nodeClaim,
-		Type:           corev1.EventTypeNormal,
+		Type:           v1.EventTypeNormal,
 		Reason:         "SpotRebalanceRecommendation",
 		Message:        "Spot rebalance recommendation was triggered",
 		DedupeValues:   []string{string(nodeClaim.UID)},
@@ -52,7 +52,7 @@ func RebalanceRecommendation(node *corev1.Node, nodeClaim *karpv1.NodeClaim) (ev
 	if node != nil {
 		evts = append(evts, events.Event{
 			InvolvedObject: node,
-			Type:           corev1.EventTypeNormal,
+			Type:           v1.EventTypeNormal,
 			Reason:         "SpotRebalanceRecommendation",
 			Message:        "Spot rebalance recommendation was triggered",
 			DedupeValues:   []string{string(node.UID)},
@@ -61,10 +61,10 @@ func RebalanceRecommendation(node *corev1.Node, nodeClaim *karpv1.NodeClaim) (ev
 	return evts
 }
 
-func Stopping(node *corev1.Node, nodeClaim *karpv1.NodeClaim) (evts []events.Event) {
+func Stopping(node *v1.Node, nodeClaim *v1beta1.NodeClaim) (evts []events.Event) {
 	evts = append(evts, events.Event{
 		InvolvedObject: nodeClaim,
-		Type:           corev1.EventTypeWarning,
+		Type:           v1.EventTypeWarning,
 		Reason:         "InstanceStopping",
 		Message:        "Instance is stopping",
 		DedupeValues:   []string{string(nodeClaim.UID)},
@@ -72,7 +72,7 @@ func Stopping(node *corev1.Node, nodeClaim *karpv1.NodeClaim) (evts []events.Eve
 	if node != nil {
 		evts = append(evts, events.Event{
 			InvolvedObject: node,
-			Type:           corev1.EventTypeWarning,
+			Type:           v1.EventTypeWarning,
 			Reason:         "InstanceStopping",
 			Message:        "Instance is stopping",
 			DedupeValues:   []string{string(node.UID)},
@@ -81,10 +81,10 @@ func Stopping(node *corev1.Node, nodeClaim *karpv1.NodeClaim) (evts []events.Eve
 	return evts
 }
 
-func Terminating(node *corev1.Node, nodeClaim *karpv1.NodeClaim) (evts []events.Event) {
+func Terminating(node *v1.Node, nodeClaim *v1beta1.NodeClaim) (evts []events.Event) {
 	evts = append(evts, events.Event{
 		InvolvedObject: nodeClaim,
-		Type:           corev1.EventTypeWarning,
+		Type:           v1.EventTypeWarning,
 		Reason:         "InstanceTerminating",
 		Message:        "Instance is terminating",
 		DedupeValues:   []string{string(nodeClaim.UID)},
@@ -92,7 +92,7 @@ func Terminating(node *corev1.Node, nodeClaim *karpv1.NodeClaim) (evts []events.
 	if node != nil {
 		evts = append(evts, events.Event{
 			InvolvedObject: node,
-			Type:           corev1.EventTypeWarning,
+			Type:           v1.EventTypeWarning,
 			Reason:         "InstanceTerminating",
 			Message:        "Instance is terminating",
 			DedupeValues:   []string{string(node.UID)},
@@ -101,10 +101,10 @@ func Terminating(node *corev1.Node, nodeClaim *karpv1.NodeClaim) (evts []events.
 	return evts
 }
 
-func Unhealthy(node *corev1.Node, nodeClaim *karpv1.NodeClaim) (evts []events.Event) {
+func Unhealthy(node *v1.Node, nodeClaim *v1beta1.NodeClaim) (evts []events.Event) {
 	evts = append(evts, events.Event{
 		InvolvedObject: nodeClaim,
-		Type:           corev1.EventTypeWarning,
+		Type:           v1.EventTypeWarning,
 		Reason:         "InstanceUnhealthy",
 		Message:        "An unhealthy warning was triggered for the instance",
 		DedupeValues:   []string{string(nodeClaim.UID)},
@@ -112,7 +112,7 @@ func Unhealthy(node *corev1.Node, nodeClaim *karpv1.NodeClaim) (evts []events.Ev
 	if node != nil {
 		evts = append(evts, events.Event{
 			InvolvedObject: node,
-			Type:           corev1.EventTypeWarning,
+			Type:           v1.EventTypeWarning,
 			Reason:         "InstanceUnhealthy",
 			Message:        "An unhealthy warning was triggered for the instance",
 			DedupeValues:   []string{string(node.UID)},
@@ -121,10 +121,10 @@ func Unhealthy(node *corev1.Node, nodeClaim *karpv1.NodeClaim) (evts []events.Ev
 	return evts
 }
 
-func TerminatingOnInterruption(node *corev1.Node, nodeClaim *karpv1.NodeClaim) (evts []events.Event) {
+func TerminatingOnInterruption(node *v1.Node, nodeClaim *v1beta1.NodeClaim) (evts []events.Event) {
 	evts = append(evts, events.Event{
 		InvolvedObject: nodeClaim,
-		Type:           corev1.EventTypeWarning,
+		Type:           v1.EventTypeWarning,
 		Reason:         "TerminatingOnInterruption",
 		Message:        "Interruption triggered termination for the NodeClaim",
 		DedupeValues:   []string{string(nodeClaim.UID)},
@@ -132,7 +132,7 @@ func TerminatingOnInterruption(node *corev1.Node, nodeClaim *karpv1.NodeClaim) (
 	if node != nil {
 		evts = append(evts, events.Event{
 			InvolvedObject: node,
-			Type:           corev1.EventTypeWarning,
+			Type:           v1.EventTypeWarning,
 			Reason:         "TerminatingOnInterruption",
 			Message:        "Interruption triggered termination for the Node",
 			DedupeValues:   []string{string(node.UID)},

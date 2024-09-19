@@ -20,15 +20,12 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
-	coreapis "sigs.k8s.io/karpenter/pkg/apis"
-	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
-
-	"github.com/aws/karpenter-provider-aws/pkg/apis"
+	v1 "sigs.k8s.io/karpenter/pkg/apis/v1"
 )
 
 func init() {
-	karpv1.RestrictedLabelDomains = karpv1.RestrictedLabelDomains.Insert(RestrictedLabelDomains...)
-	karpv1.WellKnownLabels = karpv1.WellKnownLabels.Insert(
+	v1.RestrictedLabelDomains = v1.RestrictedLabelDomains.Insert(RestrictedLabelDomains...)
+	v1.WellKnownLabels = v1.WellKnownLabels.Insert(
 		LabelInstanceHypervisor,
 		LabelInstanceEncryptionInTransitSupported,
 		LabelInstanceCategory,
@@ -54,23 +51,23 @@ func init() {
 }
 
 var (
-	TerminationFinalizer   = apis.Group + "/termination"
+	TerminationFinalizer   = Group + "/termination"
 	AWSToKubeArchitectures = map[string]string{
-		"x86_64":                 karpv1.ArchitectureAmd64,
-		karpv1.ArchitectureArm64: karpv1.ArchitectureArm64,
+		"x86_64":             v1.ArchitectureAmd64,
+		v1.ArchitectureArm64: v1.ArchitectureArm64,
 	}
 	WellKnownArchitectures = sets.NewString(
-		karpv1.ArchitectureAmd64,
-		karpv1.ArchitectureArm64,
+		v1.ArchitectureAmd64,
+		v1.ArchitectureArm64,
 	)
 	RestrictedLabelDomains = []string{
-		apis.Group,
+		Group,
 	}
 	RestrictedTagPatterns = []*regexp.Regexp{
 		// Adheres to cluster name pattern matching as specified in the API spec
 		// https://docs.aws.amazon.com/eks/latest/APIReference/API_CreateCluster.html
 		regexp.MustCompile(`^kubernetes\.io/cluster/[0-9A-Za-z][A-Za-z0-9\-_]*$`),
-		regexp.MustCompile(fmt.Sprintf("^%s$", regexp.QuoteMeta(karpv1.NodePoolLabelKey))),
+		regexp.MustCompile(fmt.Sprintf("^%s$", regexp.QuoteMeta(v1.NodePoolLabelKey))),
 		regexp.MustCompile(fmt.Sprintf("^%s$", regexp.QuoteMeta(EKSClusterNameTagKey))),
 		regexp.MustCompile(fmt.Sprintf("^%s$", regexp.QuoteMeta(LabelNodeClass))),
 		regexp.MustCompile(fmt.Sprintf("^%s$", regexp.QuoteMeta(TagNodeClaim))),
@@ -97,41 +94,40 @@ var (
 
 	EKSClusterNameTagKey = "eks:eks-cluster-name"
 
-	LabelNodeClass = apis.Group + "/ec2nodeclass"
+	LabelNodeClass = Group + "/ec2nodeclass"
 
 	LabelTopologyZoneID = "topology.k8s.aws/zone-id"
 
-	LabelInstanceHypervisor                   = apis.Group + "/instance-hypervisor"
-	LabelInstanceEncryptionInTransitSupported = apis.Group + "/instance-encryption-in-transit-supported"
-	LabelInstanceCategory                     = apis.Group + "/instance-category"
-	LabelInstanceFamily                       = apis.Group + "/instance-family"
-	LabelInstanceGeneration                   = apis.Group + "/instance-generation"
-	LabelInstanceLocalNVME                    = apis.Group + "/instance-local-nvme"
-	LabelInstanceSize                         = apis.Group + "/instance-size"
-	LabelInstanceCPU                          = apis.Group + "/instance-cpu"
-	LabelInstanceCPUManufacturer              = apis.Group + "/instance-cpu-manufacturer"
-	LabelInstanceMemory                       = apis.Group + "/instance-memory"
-	LabelInstanceEBSBandwidth                 = apis.Group + "/instance-ebs-bandwidth"
-	LabelInstanceNetworkBandwidth             = apis.Group + "/instance-network-bandwidth"
-	LabelInstanceGPUName                      = apis.Group + "/instance-gpu-name"
-	LabelInstanceGPUManufacturer              = apis.Group + "/instance-gpu-manufacturer"
-	LabelInstanceGPUCount                     = apis.Group + "/instance-gpu-count"
-	LabelInstanceGPUMemory                    = apis.Group + "/instance-gpu-memory"
-	LabelInstanceAcceleratorName              = apis.Group + "/instance-accelerator-name"
-	LabelInstanceAcceleratorManufacturer      = apis.Group + "/instance-accelerator-manufacturer"
-	LabelInstanceAcceleratorCount             = apis.Group + "/instance-accelerator-count"
-	AnnotationEC2NodeClassHash                = apis.Group + "/ec2nodeclass-hash"
-	AnnotationKubeletCompatibilityHash        = apis.CompatibilityGroup + "/kubelet-drift-hash"
-	AnnotationClusterNameTaggedCompatability  = apis.CompatibilityGroup + "/cluster-name-tagged"
-	AnnotationEC2NodeClassHashVersion         = apis.Group + "/ec2nodeclass-hash-version"
-	AnnotationInstanceTagged                  = apis.Group + "/tagged"
+	LabelInstanceHypervisor                   = Group + "/instance-hypervisor"
+	LabelInstanceEncryptionInTransitSupported = Group + "/instance-encryption-in-transit-supported"
+	LabelInstanceCategory                     = Group + "/instance-category"
+	LabelInstanceFamily                       = Group + "/instance-family"
+	LabelInstanceGeneration                   = Group + "/instance-generation"
+	LabelInstanceLocalNVME                    = Group + "/instance-local-nvme"
+	LabelInstanceSize                         = Group + "/instance-size"
+	LabelInstanceCPU                          = Group + "/instance-cpu"
+	LabelInstanceCPUManufacturer              = Group + "/instance-cpu-manufacturer"
+	LabelInstanceMemory                       = Group + "/instance-memory"
+	LabelInstanceEBSBandwidth                 = Group + "/instance-ebs-bandwidth"
+	LabelInstanceNetworkBandwidth             = Group + "/instance-network-bandwidth"
+	LabelInstanceGPUName                      = Group + "/instance-gpu-name"
+	LabelInstanceGPUManufacturer              = Group + "/instance-gpu-manufacturer"
+	LabelInstanceGPUCount                     = Group + "/instance-gpu-count"
+	LabelInstanceGPUMemory                    = Group + "/instance-gpu-memory"
+	LabelInstanceAcceleratorName              = Group + "/instance-accelerator-name"
+	LabelInstanceAcceleratorManufacturer      = Group + "/instance-accelerator-manufacturer"
+	LabelInstanceAcceleratorCount             = Group + "/instance-accelerator-count"
+	AnnotationEC2NodeClassHash                = Group + "/ec2nodeclass-hash"
+	AnnotationKubeletCompatibilityHash        = CompatibilityGroup + "/kubelet-drift-hash"
+	AnnotationEC2NodeClassHashVersion         = Group + "/ec2nodeclass-hash-version"
+	AnnotationInstanceTagged                  = Group + "/tagged"
 
-	AnnotationUbuntuCompatibilityKey                 = apis.CompatibilityGroup + "/v1beta1-ubuntu"
+	AnnotationUbuntuCompatibilityKey                 = CompatibilityGroup + "/v1beta1-ubuntu"
 	AnnotationUbuntuCompatibilityIncompatible        = "incompatible"
 	AnnotationUbuntuCompatibilityAMIFamily           = "amiFamily"
 	AnnotationUbuntuCompatibilityBlockDeviceMappings = "blockDeviceMappings"
 
-	TagNodeClaim             = coreapis.Group + "/nodeclaim"
-	TagManagedLaunchTemplate = apis.Group + "/cluster"
+	TagNodeClaim             = v1.Group + "/nodeclaim"
+	TagManagedLaunchTemplate = Group + "/cluster"
 	TagName                  = "Name"
 )

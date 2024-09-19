@@ -22,8 +22,6 @@ import (
 
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
-
-	"sigs.k8s.io/karpenter/pkg/apis"
 )
 
 // Well known labels and resources
@@ -36,26 +34,26 @@ const (
 
 // Karpenter specific domains and labels
 const (
-	NodePoolLabelKey        = apis.Group + "/nodepool"
-	NodeInitializedLabelKey = apis.Group + "/initialized"
-	NodeRegisteredLabelKey  = apis.Group + "/registered"
-	CapacityTypeLabelKey    = apis.Group + "/capacity-type"
+	NodePoolLabelKey        = Group + "/nodepool"
+	NodeInitializedLabelKey = Group + "/initialized"
+	NodeRegisteredLabelKey  = Group + "/registered"
+	CapacityTypeLabelKey    = Group + "/capacity-type"
 )
 
 // Karpenter specific annotations
 const (
-	DoNotDisruptAnnotationKey                  = apis.Group + "/do-not-disrupt"
-	ProviderCompatibilityAnnotationKey         = apis.CompatibilityGroup + "/provider"
-	NodePoolHashAnnotationKey                  = apis.Group + "/nodepool-hash"
-	NodePoolHashVersionAnnotationKey           = apis.Group + "/nodepool-hash-version"
-	KubeletCompatibilityAnnotationKey          = apis.CompatibilityGroup + "/v1beta1-kubelet-conversion"
-	NodeClassReferenceAnnotationKey            = apis.CompatibilityGroup + "/v1beta1-nodeclass-reference"
-	NodeClaimTerminationTimestampAnnotationKey = apis.Group + "/nodeclaim-termination-timestamp"
+	DoNotDisruptAnnotationKey                  = Group + "/do-not-disrupt"
+	ProviderCompatibilityAnnotationKey         = CompatibilityGroup + "/provider"
+	NodePoolHashAnnotationKey                  = Group + "/nodepool-hash"
+	NodePoolHashVersionAnnotationKey           = Group + "/nodepool-hash-version"
+	KubeletCompatibilityAnnotationKey          = CompatibilityGroup + "/v1beta1-kubelet-conversion"
+	NodeClassReferenceAnnotationKey            = CompatibilityGroup + "/v1beta1-nodeclass-reference"
+	NodeClaimTerminationTimestampAnnotationKey = Group + "/nodeclaim-termination-timestamp"
 )
 
 // Karpenter specific finalizers
 const (
-	TerminationFinalizer = apis.Group + "/termination"
+	TerminationFinalizer = Group + "/termination"
 )
 
 var (
@@ -63,7 +61,7 @@ var (
 	RestrictedLabelDomains = sets.New(
 		"kubernetes.io",
 		"k8s.io",
-		apis.Group,
+		Group,
 	)
 
 	// LabelDomainExceptions are sub-domains of the RestrictedLabelDomains but allowed because

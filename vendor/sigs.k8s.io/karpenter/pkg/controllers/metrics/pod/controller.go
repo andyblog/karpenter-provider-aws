@@ -23,7 +23,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/samber/lo"
-	corev1 "k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -35,7 +35,7 @@ import (
 
 	"sigs.k8s.io/karpenter/pkg/operator/injection"
 
-	v1 "sigs.k8s.io/karpenter/pkg/apis/v1"
+	"sigs.k8s.io/karpenter/pkg/apis/v1beta1"
 	"sigs.k8s.io/karpenter/pkg/metrics"
 )
 
@@ -50,24 +50,25 @@ const (
 	podHostCapacityType = "capacity_type"
 	podHostInstanceType = "instance_type"
 	podPhase            = "phase"
-	phasePending        = "Pending"
+
+	phasePending = "Pending"
 )
 
 var (
-	podState = prometheus.NewGaugeVec(
+	podGaugeVec = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Namespace: "karpenter",
-			Subsystem: metrics.PodSubsystem,
+			Subsystem: "pods",
 			Name:      "state",
 			Help:      "Pod state is the current state of pods. This metric can be used several ways as it is labeled by the pod name, namespace, owner, node, nodepool name, zone, architecture, capacity type, instance type and pod phase.",
 		},
 		labelNames(),
 	)
-	podStartupDurationSeconds = prometheus.NewSummary(
+	podStartupTimeSummary = prometheus.NewSummary(
 		prometheus.SummaryOpts{
 			Namespace:  "karpenter",
-			Subsystem:  metrics.PodSubsystem,
-			Name:       "startup_duration_seconds",
+			Subsystem:  "pods",
+			Name:       "startup_time_seconds",
 			Help:       "The time from pod creation until the pod is running.",
 			Objectives: metrics.SummaryObjectives(),
 		},
@@ -83,7 +84,8 @@ type Controller struct {
 }
 
 func init() {
-	crmetrics.Registry.MustRegister(podState, podStartupDurationSeconds)
+	crmetrics.Registry.MustRegister(podGaugeVec)
+	crmetrics.Registry.MustRegister(podStartupTimeSummary)
 }
 
 func labelNames() []string {
@@ -110,11 +112,15 @@ func NewController(kubeClient client.Client) *Controller {
 	}
 }
 
+func (c *Controller) Name() string {
+	return "metrics.pod"
+}
+
 // Reconcile executes a termination control loop for the resource
 func (c *Controller) Reconcile(ctx context.Context, req reconcile.Request) (reconcile.Result, error) {
 	ctx = injection.WithControllerName(ctx, "metrics.pod")
 
-	pod := &corev1.Pod{}
+	pod := &v1.Pod{}
 	if err := c.kubeClient.Get(ctx, req.NamespacedName, pod); err != nil {
 		if errors.IsNotFound(err) {
 			c.pendingPods.Delete(req.NamespacedName.String())
@@ -128,7 +134,7 @@ func (c *Controller) Reconcile(ctx context.Context, req reconcile.Request) (reco
 	}
 	c.metricStore.Update(client.ObjectKeyFromObject(pod).String(), []*metrics.StoreMetric{
 		{
-			GaugeVec: podState,
+			GaugeVec: podGaugeVec,
 			Value:    1,
 			Labels:   labels,
 		},
@@ -137,23 +143,23 @@ func (c *Controller) Reconcile(ctx context.Context, req reconcile.Request) (reco
 	return reconcile.Result{}, nil
 }
 
-func (c *Controller) recordPodStartupMetric(pod *corev1.Pod) {
+func (c *Controller) recordPodStartupMetric(pod *v1.Pod) {
 	key := client.ObjectKeyFromObject(pod).String()
 	if pod.Status.Phase == phasePending {
 		c.pendingPods.Insert(key)
 		return
 	}
-	cond, ok := lo.Find(pod.Status.Conditions, func(c corev1.PodCondition) bool {
-		return c.Type == corev1.PodReady
+	cond, ok := lo.Find(pod.Status.Conditions, func(c v1.PodCondition) bool {
+		return c.Type == v1.PodReady
 	})
 	if c.pendingPods.Has(key) && ok {
-		podStartupDurationSeconds.Observe(cond.LastTransitionTime.Sub(pod.CreationTimestamp.Time).Seconds())
+		podStartupTimeSummary.Observe(cond.LastTransitionTime.Sub(pod.CreationTimestamp.Time).Seconds())
 		c.pendingPods.Delete(key)
 	}
 }
 
 // makeLabels creates the makeLabels using the current state of the pod
-func (c *Controller) makeLabels(ctx context.Context, pod *corev1.Pod) (prometheus.Labels, error) {
+func (c *Controller) makeLabels(ctx context.Context, pod *v1.Pod) (prometheus.Labels, error) {
 	metricLabels := prometheus.Labels{}
 	metricLabels[podName] = pod.Name
 	metricLabels[podNameSpace] = pod.Namespace
@@ -168,23 +174,23 @@ func (c *Controller) makeLabels(ctx context.Context, pod *corev1.Pod) (prometheu
 	metricLabels[podHostName] = pod.Spec.NodeName
 	metricLabels[podPhase] = string(pod.Status.Phase)
 
-	node := &corev1.Node{}
+	node := &v1.Node{}
 	if pod.Spec.NodeName != "" {
 		if err := c.kubeClient.Get(ctx, types.NamespacedName{Name: pod.Spec.NodeName}, node); client.IgnoreNotFound(err) != nil {
 			return nil, err
 		}
 	}
-	metricLabels[podHostZone] = node.Labels[corev1.LabelTopologyZone]
-	metricLabels[podHostArchitecture] = node.Labels[corev1.LabelArchStable]
-	metricLabels[podHostCapacityType] = node.Labels[v1.CapacityTypeLabelKey]
-	metricLabels[podHostInstanceType] = node.Labels[corev1.LabelInstanceTypeStable]
-	metricLabels[podNodePool] = node.Labels[v1.NodePoolLabelKey]
+	metricLabels[podHostZone] = node.Labels[v1.LabelTopologyZone]
+	metricLabels[podHostArchitecture] = node.Labels[v1.LabelArchStable]
+	metricLabels[podHostCapacityType] = node.Labels[v1beta1.CapacityTypeLabelKey]
+	metricLabels[podHostInstanceType] = node.Labels[v1.LabelInstanceTypeStable]
+	metricLabels[podNodePool] = node.Labels[v1beta1.NodePoolLabelKey]
 	return metricLabels, nil
 }
 
 func (c *Controller) Register(_ context.Context, m manager.Manager) error {
 	return controllerruntime.NewControllerManagedBy(m).
 		Named("metrics.pod").
-		For(&corev1.Pod{}).
+		For(&v1.Pod{}).
 		Complete(c)
 }

@@ -21,10 +21,12 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/awserr"
 	awsclient "github.com/aws/aws-sdk-go/aws/client"
+	"github.com/aws/aws-sdk-go/aws/credentials/stscreds"
 	"github.com/aws/aws-sdk-go/aws/ec2metadata"
 	"github.com/aws/aws-sdk-go/aws/endpoints"
 	"github.com/aws/aws-sdk-go/aws/request"
@@ -35,7 +37,6 @@ import (
 	"github.com/aws/aws-sdk-go/service/eks/eksiface"
 	"github.com/aws/aws-sdk-go/service/iam"
 	"github.com/aws/aws-sdk-go/service/ssm"
-	prometheusv1 "github.com/jonathan-innis/aws-sdk-go-prometheus/v1"
 	"github.com/patrickmn/go-cache"
 	"github.com/samber/lo"
 	corev1 "k8s.io/api/core/v1"
@@ -44,12 +45,12 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/transport"
 	"sigs.k8s.io/controller-runtime/pkg/log"
-	crmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
-	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
-	karpv1beta1 "sigs.k8s.io/karpenter/pkg/apis/v1beta1"
+	corev1beta1 "sigs.k8s.io/karpenter/pkg/apis/v1beta1"
 	"sigs.k8s.io/karpenter/pkg/operator"
+	"sigs.k8s.io/karpenter/pkg/operator/scheme"
 
+	"github.com/aws/karpenter-provider-aws/pkg/apis"
 	awscache "github.com/aws/karpenter-provider-aws/pkg/cache"
 	"github.com/aws/karpenter-provider-aws/pkg/operator/options"
 	"github.com/aws/karpenter-provider-aws/pkg/providers/amifamily"
@@ -65,8 +66,8 @@ import (
 )
 
 func init() {
-	karpv1beta1.NormalizedLabels = lo.Assign(karpv1.NormalizedLabels, map[string]string{"topology.ebs.csi.aws.com/zone": corev1.LabelTopologyZone})
-	karpv1.NormalizedLabels = lo.Assign(karpv1.NormalizedLabels, map[string]string{"topology.ebs.csi.aws.com/zone": corev1.LabelTopologyZone})
+	lo.Must0(apis.AddToScheme(scheme.Scheme))
+	corev1beta1.NormalizedLabels = lo.Assign(corev1beta1.NormalizedLabels, map[string]string{"topology.ebs.csi.aws.com/zone": corev1.LabelTopologyZone})
 }
 
 // Operator is injected into the AWS CloudProvider's factories
@@ -94,15 +95,17 @@ func NewOperator(ctx context.Context, operator *operator.Operator) (context.Cont
 		STSRegionalEndpoint: endpoints.RegionalSTSEndpoint,
 	}
 
-	// prometheusv1.WithPrometheusMetrics is used until the upstream aws-sdk-go or aws-sdk-go-v2 supports
-	// Prometheus metrics for client-side metrics out-of-the-box
-	// See: https://github.com/aws/aws-sdk-go-v2/issues/1744
-	sess := prometheusv1.WithPrometheusMetrics(WithUserAgent(session.Must(session.NewSession(
+	if assumeRoleARN := options.FromContext(ctx).AssumeRoleARN; assumeRoleARN != "" {
+		config.Credentials = stscreds.NewCredentials(session.Must(session.NewSession()), assumeRoleARN,
+			func(provider *stscreds.AssumeRoleProvider) { SetDurationAndExpiry(ctx, provider) })
+	}
+
+	sess := WithUserAgent(session.Must(session.NewSession(
 		request.WithRetryer(
 			config,
 			awsclient.DefaultRetryer{NumMaxRetries: awsclient.DefaultRetryerMaxNumRetries},
 		),
-	))), crmetrics.Registry)
+	)))
 
 	if *sess.Config.Region == "" {
 		log.FromContext(ctx).V(1).Info("retrieving region from IMDS")
@@ -143,7 +146,7 @@ func NewOperator(ctx context.Context, operator *operator.Operator) (context.Cont
 		*sess.Config.Region,
 	)
 	versionProvider := version.NewDefaultProvider(operator.KubernetesInterface, cache.New(awscache.DefaultTTL, awscache.DefaultCleanupInterval))
-	ssmProvider := ssmp.NewDefaultProvider(ssm.New(sess), cache.New(awscache.SSMGetParametersByPathTTL, awscache.DefaultCleanupInterval))
+	ssmProvider := ssmp.NewDefaultProvider(ssm.New(sess), cache.New(awscache.SSMProviderTTL, awscache.DefaultCleanupInterval))
 	amiProvider := amifamily.NewDefaultProvider(versionProvider, ssmProvider, ec2api, cache.New(awscache.DefaultTTL, awscache.DefaultCleanupInterval))
 	amiResolver := amifamily.NewResolver(amiProvider)
 	launchTemplateProvider := launchtemplate.NewDefaultProvider(
@@ -192,7 +195,6 @@ func NewOperator(ctx context.Context, operator *operator.Operator) (context.Cont
 		PricingProvider:           pricingProvider,
 		InstanceTypesProvider:     instanceTypeProvider,
 		InstanceProvider:          instanceProvider,
-		SSMProvider:               ssmProvider,
 	}
 }
 
@@ -260,4 +262,9 @@ func KubeDNSIP(ctx context.Context, kubernetesInterface kubernetes.Interface) (n
 		return nil, fmt.Errorf("parsing cluster IP")
 	}
 	return kubeDNSIP, nil
+}
+
+func SetDurationAndExpiry(ctx context.Context, provider *stscreds.AssumeRoleProvider) {
+	provider.Duration = options.FromContext(ctx).AssumeRoleDuration
+	provider.ExpiryWindow = time.Duration(10) * time.Second
 }

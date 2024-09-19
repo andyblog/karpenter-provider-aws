@@ -20,9 +20,10 @@ import (
 	"context"
 
 	"go.uber.org/multierr"
-	corev1 "k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/clock"
 	controllerruntime "sigs.k8s.io/controller-runtime"
@@ -33,39 +34,41 @@ import (
 
 	"sigs.k8s.io/karpenter/pkg/operator/injection"
 
-	v1 "sigs.k8s.io/karpenter/pkg/apis/v1"
+	"sigs.k8s.io/karpenter/pkg/apis/v1beta1"
 	"sigs.k8s.io/karpenter/pkg/cloudprovider"
+	"sigs.k8s.io/karpenter/pkg/controllers/state"
 	nodeclaimutil "sigs.k8s.io/karpenter/pkg/utils/nodeclaim"
 	"sigs.k8s.io/karpenter/pkg/utils/result"
 )
 
 type nodeClaimReconciler interface {
-	Reconcile(context.Context, *v1.NodePool, *v1.NodeClaim) (reconcile.Result, error)
+	Reconcile(context.Context, *v1beta1.NodePool, *v1beta1.NodeClaim) (reconcile.Result, error)
 }
 
 // Controller is a disruption controller that adds StatusConditions to nodeclaims when they meet certain disruption conditions
-// e.g. When the NodeClaim has become empty, then it is marked as "Empty" in the StatusConditions
+// e.g. When the NodeClaim has surpassed its owning provisioner's expirationTTL, then it is marked as "Expired" in the StatusConditions
 type Controller struct {
 	kubeClient    client.Client
 	cloudProvider cloudprovider.CloudProvider
 
-	drift         *Drift
-	consolidation *Consolidation
+	drift      *Drift
+	expiration *Expiration
+	emptiness  *Emptiness
 }
 
-// NewController constructs a nodeclaim disruption controller. Note that every sub-controller has a dependency on its nodepool.
-// Disruption mechanisms that don't depend on the nodepool (like expiration), should live elsewhere.
-func NewController(clk clock.Clock, kubeClient client.Client, cloudProvider cloudprovider.CloudProvider) *Controller {
+// NewController constructs a nodeclaim disruption controller
+func NewController(clk clock.Clock, kubeClient client.Client, cluster *state.Cluster, cloudProvider cloudprovider.CloudProvider) *Controller {
 	return &Controller{
 		kubeClient:    kubeClient,
 		cloudProvider: cloudProvider,
 		drift:         &Drift{cloudProvider: cloudProvider},
-		consolidation: &Consolidation{kubeClient: kubeClient, clock: clk},
+		expiration:    &Expiration{kubeClient: kubeClient, clock: clk},
+		emptiness:     &Emptiness{kubeClient: kubeClient, cluster: cluster, clock: clk},
 	}
 }
 
 // Reconcile executes a control loop for the resource
-func (c *Controller) Reconcile(ctx context.Context, nodeClaim *v1.NodeClaim) (reconcile.Result, error) {
+func (c *Controller) Reconcile(ctx context.Context, nodeClaim *v1beta1.NodeClaim) (reconcile.Result, error) {
 	ctx = injection.WithControllerName(ctx, "nodeclaim.disruption")
 
 	if !nodeClaim.DeletionTimestamp.IsZero() {
@@ -73,19 +76,20 @@ func (c *Controller) Reconcile(ctx context.Context, nodeClaim *v1.NodeClaim) (re
 	}
 
 	stored := nodeClaim.DeepCopy()
-	nodePoolName, ok := nodeClaim.Labels[v1.NodePoolLabelKey]
+	nodePoolName, ok := nodeClaim.Labels[v1beta1.NodePoolLabelKey]
 	if !ok {
 		return reconcile.Result{}, nil
 	}
-	nodePool := &v1.NodePool{}
+	nodePool := &v1beta1.NodePool{}
 	if err := c.kubeClient.Get(ctx, types.NamespacedName{Name: nodePoolName}, nodePool); err != nil {
 		return reconcile.Result{}, client.IgnoreNotFound(err)
 	}
 	var results []reconcile.Result
 	var errs error
 	reconcilers := []nodeClaimReconciler{
+		c.expiration,
 		c.drift,
-		c.consolidation,
+		c.emptiness,
 	}
 	for _, reconciler := range reconcilers {
 		res, err := reconciler.Reconcile(ctx, nodePool, nodeClaim)
@@ -111,22 +115,24 @@ func (c *Controller) Reconcile(ctx context.Context, nodeClaim *v1.NodeClaim) (re
 
 func (c *Controller) Register(_ context.Context, m manager.Manager) error {
 	builder := controllerruntime.NewControllerManagedBy(m)
-	for _, nodeClass := range c.cloudProvider.GetSupportedNodeClasses() {
+	for _, ncGVK := range c.cloudProvider.GetSupportedNodeClasses() {
+		nodeclass := &unstructured.Unstructured{}
+		nodeclass.SetGroupVersionKind(ncGVK)
 		builder = builder.Watches(
-			nodeClass,
+			nodeclass,
 			nodeclaimutil.NodeClassEventHandler(c.kubeClient),
 		)
 	}
 	return builder.
 		Named("nodeclaim.disruption").
-		For(&v1.NodeClaim{}).
+		For(&v1beta1.NodeClaim{}).
 		WithOptions(controller.Options{MaxConcurrentReconciles: 10}).
 		Watches(
-			&v1.NodePool{},
+			&v1beta1.NodePool{},
 			nodeclaimutil.NodePoolEventHandler(c.kubeClient),
 		).
 		Watches(
-			&corev1.Pod{},
+			&v1.Pod{},
 			nodeclaimutil.PodEventHandler(c.kubeClient),
 		).
 		Complete(reconcile.AsReconciler(m.GetClient(), c))

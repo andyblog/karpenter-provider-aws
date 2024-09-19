@@ -11,9 +11,7 @@ Karpenter automatically provisions new nodes in response to unschedulable pods. 
 
 This guide shows how to get started with Karpenter by creating a Kubernetes cluster and installing Karpenter.
 To use Karpenter, you must be running a supported Kubernetes cluster on a supported cloud provider.
-Currently, the following Cloud Providers are supported:
-- [AWS](https://github.com/aws/karpenter-provider-aws)
-- [Azure](https://github.com/Azure/karpenter-provider-azure)
+Currently, only EKS on AWS is supported.
 
 ## Create a cluster and add Karpenter
 
@@ -34,7 +32,7 @@ Install these tools before proceeding:
 
 1. [AWS CLI](https://docs.aws.amazon.com/cli/latest/userguide/install-cliv2-linux.html)
 2. `kubectl` - [the Kubernetes CLI](https://kubernetes.io/docs/tasks/tools/install-kubectl-linux/)
-3. `eksctl` (>= v0.180.0) - [the CLI for AWS EKS](https://docs.aws.amazon.com/eks/latest/userguide/eksctl.html)
+3. `eksctl` (>= v0.169.0) - [the CLI for AWS EKS](https://docs.aws.amazon.com/eks/latest/userguide/eksctl.html)
 4. `helm` - [the package manager for Kubernetes](https://helm.sh/docs/intro/install/)
 
 [Configure the AWS CLI](https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-quickstart.html)
@@ -89,10 +87,17 @@ The following cluster configuration will:
   {{% /tab %}}
 {{< /tabpane >}}
 
-Unless your AWS account has already onboarded to EC2 Spot, you will need to create the service linked role to
-avoid the [`ServiceLinkedRoleCreationNotPermitted` error]({{<ref "../../troubleshooting/#missing-service-linked-role" >}}).
-
 {{% script file="./content/en/{VERSION}/getting-started/getting-started-with-karpenter/scripts/step06-add-spot-role.sh" language="bash"%}}
+
+{{% alert title="EKSCTL Breaking Change" color="warning" %}}
+Starting with `eksctl` v1.77.0, a service account is created for each podIdentityAssociation.
+This default service account is incompatible with the Karpenter Helm chart, and it will need to be removed to proceed with installation.
+If you're on an affected version of `eksctl` and you created a cluster with a `podIdentityAssociation`, run the following command before proceeding with the rest of the installation.
+This has been identified as a breaking change in `eksctl` which will be addressed in a future release ([GitHub Issue](https://github.com/eksctl-io/eksctl/issues/7775)).
+```bash
+kubectl delete sa -n ${KARPENTER_NAMESPACE} karpenter
+```
+{{% /alert %}}
 
 {{% alert title="Windows Support Notice" color="warning" %}}
 In order to run Windows workloads, Windows support should be enabled in your EKS Cluster.
@@ -153,7 +158,7 @@ A single Karpenter NodePool is capable of handling many different pod shapes. Ka
 
 Create a default NodePool using the command below. This NodePool uses `securityGroupSelectorTerms` and `subnetSelectorTerms` to discover resources used to launch nodes. We applied the tag `karpenter.sh/discovery` in the `eksctl` command above. Depending on how these resources are shared between clusters, you may need to use different tagging schemes.
 
-The `consolidationPolicy` set to `WhenEmptyOrUnderutilized` in the `disruption` block configures Karpenter to reduce cluster cost by removing and replacing nodes. As a result, consolidation will terminate any empty nodes on the cluster. This behavior can be disabled by setting `consolidateAfter` to `Never`, telling Karpenter that it should never consolidate nodes. Review the [NodePool API docs]({{<ref "../../concepts/nodepools" >}}) for more information.
+The `consolidationPolicy` set to `WhenUnderutilized` in the `disruption` block configures Karpenter to reduce cluster cost by removing and replacing nodes. As a result, consolidation will terminate any empty nodes on the cluster. This behavior can be disabled by setting `consolidateAfter` to `Never`, telling Karpenter that it should never consolidate nodes. Review the [NodePool API docs]({{<ref "../../concepts/nodepools" >}}) for more information.
 
 Note: This NodePool will create capacity as long as the sum of all created capacity is less than the specified limit.
 

@@ -56,6 +56,6 @@ func (p *DefaultProvider) Get(ctx context.Context, parameter string) (string, er
 		return "", fmt.Errorf("getting ssm parameter %q, %w", parameter, err)
 	}
 	p.cache.SetDefault(parameter, lo.FromPtr(result.Parameter.Value))
-	log.FromContext(ctx).WithValues("parameter", parameter, "value", result.Parameter.Value).Info("discovered ssm parameter")
+	log.FromContext(ctx).WithValues("parameter", parameter, "value", lo.FromPtr(result.Parameter.Value)).Info("discovered ssm parameter")
 	return lo.FromPtr(result.Parameter.Value), nil
 }
