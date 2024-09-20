@@ -190,8 +190,6 @@ func (t *Terminator) RestartDeployments(ctx context.Context, deployments []*apps
 			continue
 		}
 
-		log.FromContext(ctx).WithValues("deployment", deployment.Name).Info("restart deployment")
-
 		deployment.Spec.Template.Annotations["kubectl.kubernetes.io/restartedNode"] = nodeName
 		if err := t.kubeClient.Update(ctx, deployment); err != nil {
 			return err
