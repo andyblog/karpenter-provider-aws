@@ -144,43 +144,54 @@ func (t *Terminator) Evict(pods []*v1.Pod) {
 	}
 }
 
-
 func (t *Terminator) GetDeploymentFromPod(ctx context.Context, pod *v1.Pod) (*appsv1.Deployment, error) {
-	var rsName string
+	rs, err := t.getOwnerReplicaSet(ctx, pod)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get ReplicaSet from Pod: %w", err)
+	}
+	if rs == nil {
+		return nil, nil
+	}
+
+	deployment, err := t.getOwnerDeployment(ctx, rs)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get Deployment from ReplicaSet: %w", err)
+	}
+	return deployment, nil
+
+}
+
+func (t *Terminator) getOwnerReplicaSet(ctx context.Context, pod *v1.Pod) (*appsv1.ReplicaSet, error) {
 	for _, ownerRef := range pod.GetOwnerReferences() {
 		if ownerRef.Controller != nil && ownerRef.Kind == "ReplicaSet" {
-			rsName = ownerRef.Name
-			break
+			rs := &appsv1.ReplicaSet{}
+			if err := t.kubeClient.Get(ctx, client.ObjectKey{Name: ownerRef.Name, Namespace: pod.Namespace}, rs); err != nil {
+				return nil, fmt.Errorf("get ReplicaSet: %w", err)
+			}
+			return rs, nil
 		}
 	}
-	if rsName == "" {
-		return nil, nil
-	}
 
-	replicaSet := &appsv1.ReplicaSet{}
-	if err := t.kubeClient.Get(ctx, client.ObjectKey{Name: rsName, Namespace: pod.Namespace}, replicaSet); err != nil {
-		return nil, fmt.Errorf("get rs, %w", err)
-	}
+	return nil, nil
+}
 
-	var dpName string
-	for _, ownerRef := range replicaSet.GetOwnerReferences() {
+func (t *Terminator) getOwnerDeployment(ctx context.Context, rs *appsv1.ReplicaSet) (*appsv1.Deployment, error) {
+	for _, ownerRef := range rs.GetOwnerReferences() {
 		if ownerRef.Controller != nil && ownerRef.Kind == "Deployment" {
-			dpName = ownerRef.Name
-			break
+			deployment := &appsv1.Deployment{}
+			if err := t.kubeClient.Get(ctx, client.ObjectKey{Name: ownerRef.Name, Namespace: rs.Namespace}, deployment); err != nil {
+				return nil, fmt.Errorf("get Deployment: %w", err)
+			}
+			return deployment, nil
 		}
 	}
-	if dpName == "" {
-		return nil, nil
-	}
-	deployment := &appsv1.Deployment{}
-	if err := t.kubeClient.Get(ctx, client.ObjectKey{Name: dpName, Namespace: pod.Namespace}, deployment); err != nil {
-		return nil, fmt.Errorf("get deployment, %w", err)
-	}
 
-	return deployment, nil
+	return nil, nil
 }
 
 func (t *Terminator) RestartDeployments(ctx context.Context, deployments []*appsv1.Deployment, nodeName string) error {
+	var updateErrors []error
+
 	for _, deployment := range deployments {
 		if deployment.Spec.Template.Annotations == nil {
 			deployment.Spec.Template.Annotations = make(map[string]string)
@@ -190,38 +201,42 @@ func (t *Terminator) RestartDeployments(ctx context.Context, deployments []*apps
 			continue
 		}
 
+		log.FromContext(ctx).WithValues("deployment", deployment.Name).Info("restart deployment")
+
 		deployment.Spec.Template.Annotations["kubectl.kubernetes.io/restartedNode"] = nodeName
+
 		if err := t.kubeClient.Update(ctx, deployment); err != nil {
-			return err
+			updateErrors = append(updateErrors, err)
+			continue
 		}
 
 	}
+
+	if len(updateErrors) > 0 {
+		return fmt.Errorf("failed to restart some deployment: %v", updateErrors)
+	}
+
 	return nil
 }
 
 func (t *Terminator) GetRestartdeploymentsAndDrainPods(ctx context.Context, pods []*v1.Pod) ([]*appsv1.Deployment, []*v1.Pod, error) {
-
 	var drainPods []*v1.Pod
 	var restartDeployments []*appsv1.Deployment
 	nodeDeploymentReplicas := make(map[string]int32)
+	deploymentCache := make(map[string]*appsv1.Deployment)
 
 	for _, pod := range pods {
-		deployment, err := t.GetDeploymentFromPod(ctx, pod)
+		deployment, err := t.getDeploymentFromCache(ctx, pod, deploymentCache)
 		if err != nil {
 			return nil, nil, err
 		}
-
 		if deployment != nil {
-			nodeDeploymentReplicas[deployment.Namespace+"/"+deployment.Name] += 1
+			nodeDeploymentReplicas[deployment.Namespace+"/"+deployment.Name]++
 		}
 	}
 
 	for _, pod := range pods {
-		deployment, err := t.GetDeploymentFromPod(ctx, pod)
-		if err != nil {
-			return nil, nil, err
-		}
-
+		deployment := deploymentCache[pod.Namespace+"/"+pod.Name]
 		if deployment != nil && nodeDeploymentReplicas[deployment.Namespace+"/"+deployment.Name] == *deployment.Spec.Replicas {
 			restartDeployments = append(restartDeployments, deployment)
 		} else {
@@ -230,4 +245,19 @@ func (t *Terminator) GetRestartdeploymentsAndDrainPods(ctx context.Context, pods
 	}
 
 	return restartDeployments, drainPods, nil
+}
+
+func (t *Terminator) getDeploymentFromCache(ctx context.Context, pod *v1.Pod, cache map[string]*appsv1.Deployment) (*appsv1.Deployment, error) {
+	key := pod.Namespace + "/" + pod.Name
+	if deployment, exists := cache[key]; exists {
+		return deployment, nil
+	}
+
+	deployment, err := t.GetDeploymentFromPod(ctx, pod)
+	if err != nil {
+		return nil, err
+	}
+
+	cache[key] = deployment
+	return deployment, nil
 }
