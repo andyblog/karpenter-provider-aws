@@ -105,6 +105,7 @@ func (t *Terminator) Drain(ctx context.Context, node *v1.Node) error {
 	// or are still actively terminated and haven't exceeded their termination grace period yet
 	podsWaitingEvictionCount := lo.CountBy(pods, func(p *v1.Pod) bool { return podutil.IsWaitingEviction(p, t.clock) })
 	if podsWaitingEvictionCount > 0 {
+		log.FromContext(ctx).WithValues("nums", podsWaitingEvictionCount).Info("pods are waiting to be evicted")
 		return NewNodeDrainError(fmt.Errorf("%d pods are waiting to be evicted", len(pods)))
 	}
 	return nil
