@@ -224,6 +224,7 @@ func (t *Terminator) GetRestartdeploymentsAndDrainPods(ctx context.Context, pods
 	var restartDeployments []*appsv1.Deployment
 	nodeDeploymentReplicas := make(map[string]int32)
 	deploymentCache := make(map[string]*appsv1.Deployment)
+	uniqueDeployments := make(map[string]*appsv1.Deployment)
 
 	for _, pod := range pods {
 		deployment, err := t.getDeploymentFromCache(ctx, pod, deploymentCache)
@@ -238,7 +239,11 @@ func (t *Terminator) GetRestartdeploymentsAndDrainPods(ctx context.Context, pods
 	for _, pod := range pods {
 		deployment := deploymentCache[pod.Namespace+"/"+pod.Name]
 		if deployment != nil && nodeDeploymentReplicas[deployment.Namespace+"/"+deployment.Name] == *deployment.Spec.Replicas {
-			restartDeployments = append(restartDeployments, deployment)
+			key := deployment.Namespace + "/" + deployment.Name
+			if _, exists := uniqueDeployments[key]; !exists {
+				uniqueDeployments[key] = deployment
+				restartDeployments = append(restartDeployments, deployment)
+			}
 		} else {
 			drainPods = append(drainPods, pod)
 		}
