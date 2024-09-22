@@ -99,10 +99,6 @@ func (t *Terminator) Drain(ctx context.Context, node *v1.Node) error {
 		return fmt.Errorf("restart deployments from node %s, %w", node.Name, err)
 	}
 
-	for _, pod := range drainPods {
-		log.FromContext(ctx).WithValues("name", pod.Name).Info("####drainPods")
-	}
-
 	// evictablePods are pods that aren't yet terminating are eligible to have the eviction API called against them
 	evictablePods := lo.Filter(drainPods, func(p *v1.Pod, _ int) bool { return podutil.IsEvictable(p) })
 	t.Evict(evictablePods)
