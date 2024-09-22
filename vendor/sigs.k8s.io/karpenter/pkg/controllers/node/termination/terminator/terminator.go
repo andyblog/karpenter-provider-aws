@@ -211,6 +211,9 @@ func (t *Terminator) RestartDeployments(ctx context.Context, deployments []*apps
 		}
 
 		log.FromContext(ctx).WithValues("deployment", deployment.Name).Info("restart deployment")
+		if t.nodeRestartDeployments[nodeName] == nil {
+			t.nodeRestartDeployments[nodeName] = make(map[string]struct{})
+		}
 		t.nodeRestartDeployments[nodeName][deployment.Namespace+"/"+deployment.Name] = struct{}{}
 
 		deployment.Spec.Template.Annotations["kubectl.kubernetes.io/restartedNode"] = nodeName
