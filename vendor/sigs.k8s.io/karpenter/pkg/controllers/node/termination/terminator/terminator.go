@@ -248,20 +248,22 @@ func (t *Terminator) GetRestartdeploymentsAndDrainPods(ctx context.Context, pods
 	for _, pod := range pods {
 		deployment := deploymentCache[pod.Namespace+"/"+pod.Name]
 
-		key := deployment.Namespace + "/" + deployment.Name
-		if deployment != nil && nodeDeploymentReplicas[key] == *deployment.Spec.Replicas {
-			// If a deployment has multiple pods on this node, there will be multiple deployments here, and deduplication is required.
-			if _, exists := uniqueDeployments[key]; !exists {
-				uniqueDeployments[key] = struct{}{}
-				restartDeployments = append(restartDeployments, deployment)
-			}
-			continue
-		}
-
 		if deployment != nil {
-			if _, exists := t.nodeRestartDeployments[nodeName][key]; exists {
+			key := deployment.Namespace + "/" + deployment.Name
+			if nodeDeploymentReplicas[key] == *deployment.Spec.Replicas {
+				// If a deployment has multiple pods on this node, there will be multiple deployments here, and deduplication is required.
+				if _, exists := uniqueDeployments[key]; !exists {
+					uniqueDeployments[key] = struct{}{}
+					restartDeployments = append(restartDeployments, deployment)
+				}
 				continue
-
+			} else {
+				// If a deployment has multiple copies, all of which are on this node,
+				// when the restart begins, the number of copies of the deployment on this node will gradually decrease.
+				// This situation needs to be judged separately.
+				if _, exists := t.nodeRestartDeployments[nodeName][key]; exists {
+					continue
+				}
 			}
 		}
 
