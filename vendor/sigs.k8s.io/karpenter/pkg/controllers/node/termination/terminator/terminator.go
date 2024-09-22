@@ -240,6 +240,7 @@ func (t *Terminator) GetRestartdeploymentsAndDrainPods(ctx context.Context, pods
 	for _, pod := range pods {
 		deployment := deploymentCache[pod.Namespace+"/"+pod.Name]
 		if deployment != nil && nodeDeploymentReplicas[deployment.Namespace+"/"+deployment.Name] == *deployment.Spec.Replicas {
+			// If a deployment has multiple pods on this node, there will be multiple deployments here, and deduplication is required.
 			key := deployment.Namespace + "/" + deployment.Name
 			if _, exists := uniqueDeployments[key]; !exists {
 				uniqueDeployments[key] = deployment
