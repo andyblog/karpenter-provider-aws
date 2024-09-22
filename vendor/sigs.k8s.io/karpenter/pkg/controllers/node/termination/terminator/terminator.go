@@ -21,8 +21,8 @@ import (
 	"fmt"
 
 	"github.com/samber/lo"
-	v1 "k8s.io/api/core/v1"
 	appsv1 "k8s.io/api/apps/v1"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/utils/clock"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -35,16 +35,18 @@ import (
 )
 
 type Terminator struct {
-	clock         clock.Clock
-	kubeClient    client.Client
-	evictionQueue *Queue
+	clock                  clock.Clock
+	kubeClient             client.Client
+	nodeRestartDeployments map[string]map[string]struct{}
+	evictionQueue          *Queue
 }
 
 func NewTerminator(clk clock.Clock, kubeClient client.Client, eq *Queue) *Terminator {
 	return &Terminator{
-		clock:         clk,
-		kubeClient:    kubeClient,
-		evictionQueue: eq,
+		clock:                  clk,
+		kubeClient:             kubeClient,
+		nodeRestartDeployments: make(map[string]map[string]struct{}),
+		evictionQueue:          eq,
 	}
 }
 
@@ -89,14 +91,13 @@ func (t *Terminator) Drain(ctx context.Context, node *v1.Node) error {
 	// If the deployment corresponding to the pod has only one pod,
 	// or all the pods of the deployment are on this node,
 	// restarting the deployment can reduce the service interruption time.
-	restartDeployments, drainPods, err := t.GetRestartdeploymentsAndDrainPods(ctx, pods)
+	restartDeployments, drainPods, err := t.GetRestartdeploymentsAndDrainPods(ctx, pods, node.Name)
 	if err != nil {
 		return fmt.Errorf("get deployment and drain pod from node %w", err)
 	}
 	if err = t.RestartDeployments(ctx, restartDeployments, node.Name); err != nil {
 		return fmt.Errorf("restart deployments from node %s, %w", node.Name, err)
 	}
-
 
 	for _, pod := range drainPods {
 		log.FromContext(ctx).WithValues("name", pod.Name).Info("####drainPods")
@@ -113,6 +114,8 @@ func (t *Terminator) Drain(ctx context.Context, node *v1.Node) error {
 		log.FromContext(ctx).WithValues("nums", podsWaitingEvictionCount).Info("pods are waiting to be evicted")
 		return NewNodeDrainError(fmt.Errorf("%d pods are waiting to be evicted", len(pods)))
 	}
+
+	delete(t.nodeRestartDeployments, node.Name)
 	return nil
 }
 
@@ -208,9 +211,9 @@ func (t *Terminator) RestartDeployments(ctx context.Context, deployments []*apps
 		}
 
 		log.FromContext(ctx).WithValues("deployment", deployment.Name).Info("restart deployment")
+		t.nodeRestartDeployments[nodeName][deployment.Namespace+"/"+deployment.Name] = struct{}{}
 
 		deployment.Spec.Template.Annotations["kubectl.kubernetes.io/restartedNode"] = nodeName
-
 		if err := t.kubeClient.Update(ctx, deployment); err != nil {
 			updateErrors = append(updateErrors, err)
 			continue
@@ -225,12 +228,12 @@ func (t *Terminator) RestartDeployments(ctx context.Context, deployments []*apps
 	return nil
 }
 
-func (t *Terminator) GetRestartdeploymentsAndDrainPods(ctx context.Context, pods []*v1.Pod) ([]*appsv1.Deployment, []*v1.Pod, error) {
+func (t *Terminator) GetRestartdeploymentsAndDrainPods(ctx context.Context, pods []*v1.Pod, nodeName string) ([]*appsv1.Deployment, []*v1.Pod, error) {
 	var drainPods []*v1.Pod
 	var restartDeployments []*appsv1.Deployment
 	nodeDeploymentReplicas := make(map[string]int32)
 	deploymentCache := make(map[string]*appsv1.Deployment)
-	uniqueDeployments := make(map[string]*appsv1.Deployment)
+	uniqueDeployments := make(map[string]struct{})
 
 	for _, pod := range pods {
 		deployment, err := t.getDeploymentFromCache(ctx, pod, deploymentCache)
@@ -244,16 +247,25 @@ func (t *Terminator) GetRestartdeploymentsAndDrainPods(ctx context.Context, pods
 
 	for _, pod := range pods {
 		deployment := deploymentCache[pod.Namespace+"/"+pod.Name]
-		if deployment != nil && nodeDeploymentReplicas[deployment.Namespace+"/"+deployment.Name] == *deployment.Spec.Replicas {
+
+		key := deployment.Namespace + "/" + deployment.Name
+		if deployment != nil && nodeDeploymentReplicas[key] == *deployment.Spec.Replicas {
 			// If a deployment has multiple pods on this node, there will be multiple deployments here, and deduplication is required.
-			key := deployment.Namespace + "/" + deployment.Name
 			if _, exists := uniqueDeployments[key]; !exists {
-				uniqueDeployments[key] = deployment
+				uniqueDeployments[key] = struct{}{}
 				restartDeployments = append(restartDeployments, deployment)
 			}
-		} else {
-			drainPods = append(drainPods, pod)
+			continue
 		}
+
+		if deployment != nil {
+			if _, exists := t.nodeRestartDeployments[nodeName][key]; exists {
+				continue
+
+			}
+		}
+
+		drainPods = append(drainPods, pod)
 	}
 
 	return restartDeployments, drainPods, nil
