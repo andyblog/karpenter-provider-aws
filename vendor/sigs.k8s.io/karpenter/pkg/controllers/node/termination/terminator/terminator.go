@@ -19,6 +19,7 @@ package terminator
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"github.com/samber/lo"
 	appsv1 "k8s.io/api/apps/v1"
@@ -35,6 +36,7 @@ import (
 )
 
 type Terminator struct {
+	sync.RWMutex
 	clock                  clock.Clock
 	kubeClient             client.Client
 	nodeRestartDeployments map[string]map[string]struct{}
@@ -111,7 +113,9 @@ func (t *Terminator) Drain(ctx context.Context, node *v1.Node) error {
 		return NewNodeDrainError(fmt.Errorf("%d pods are waiting to be evicted", len(pods)))
 	}
 
+	t.Lock()
 	delete(t.nodeRestartDeployments, node.Name)
+	t.Unlock()
 	return nil
 }
 
@@ -207,10 +211,12 @@ func (t *Terminator) RestartDeployments(ctx context.Context, deployments []*apps
 		}
 
 		log.FromContext(ctx).WithValues("deployment", deployment.Name).Info("restart deployment")
+		t.Lock()
 		if t.nodeRestartDeployments[nodeName] == nil {
 			t.nodeRestartDeployments[nodeName] = make(map[string]struct{})
 		}
 		t.nodeRestartDeployments[nodeName][deployment.Namespace+"/"+deployment.Name] = struct{}{}
+		t.Unlock()
 
 		deployment.Spec.Template.Annotations["kubectl.kubernetes.io/restartedNode"] = nodeName
 		if err := t.kubeClient.Update(ctx, deployment); err != nil {
@@ -260,7 +266,10 @@ func (t *Terminator) GetRestartdeploymentsAndDrainPods(ctx context.Context, pods
 				// If a deployment has multiple copies, all of which are on this node,
 				// when the restart begins, the number of copies of the deployment on this node will gradually decrease.
 				// This situation needs to be judged separately.
-				if _, exists := t.nodeRestartDeployments[nodeName][key]; exists {
+				t.RLock()
+				_, exists := t.nodeRestartDeployments[nodeName][key]
+				t.RUnlock()
+				if exists {
 					continue
 				}
 			}
