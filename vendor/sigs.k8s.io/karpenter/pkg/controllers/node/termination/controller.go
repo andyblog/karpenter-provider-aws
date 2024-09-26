@@ -102,7 +102,7 @@ func (c *Controller) finalize(ctx context.Context, node *v1.Node) (reconcile.Res
 				return reconcile.Result{}, fmt.Errorf("getting nodeclaim, %w", err)
 			}
 		}
-		return reconcile.Result{RequeueAfter: 5 * time.Second}, nil
+		return reconcile.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 	// Be careful when removing this delete call in the Node termination flow
 	// This delete call is needed so that we ensure that we don't remove the node from the cluster

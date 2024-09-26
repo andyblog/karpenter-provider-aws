@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/samber/lo"
 	appsv1 "k8s.io/api/apps/v1"
@@ -93,10 +94,19 @@ func (t *Terminator) Drain(ctx context.Context, node *v1.Node) error {
 	// If the deployment corresponding to the pod has only one pod,
 	// or all the pods of the deployment are on this node,
 	// restarting the deployment can reduce the service interruption time.
-	restartDeployments, drainPods, err := t.GetRestartdeploymentsAndDrainPods(ctx, pods, node.Name)
-	if err != nil {
-		return fmt.Errorf("get deployment and drain pod from node %w", err)
+	var drainPods []*v1.Pod
+	var restartDeployments []*appsv1.Deployment
+	deletionDeadline := node.GetDeletionTimestamp().Add(2 * time.Minute)
+
+	if time.Now().Before(deletionDeadline) {
+		restartDeployments, drainPods, err = t.GetRestartdeploymentsAndDrainPods(ctx, pods, node.Name)
+		if err != nil {
+			return fmt.Errorf("get deployment and drain pod from node %w", err)
+		}
+	} else {
+		drainPods = pods
 	}
+
 	if err = t.RestartDeployments(ctx, restartDeployments, node.Name); err != nil {
 		return fmt.Errorf("restart deployments from node %s, %w", node.Name, err)
 	}
@@ -104,6 +114,10 @@ func (t *Terminator) Drain(ctx context.Context, node *v1.Node) error {
 	// evictablePods are pods that aren't yet terminating are eligible to have the eviction API called against them
 	evictablePods := lo.Filter(drainPods, func(p *v1.Pod, _ int) bool { return podutil.IsEvictable(p) })
 	t.Evict(evictablePods)
+
+	for _, p := range  evictablePods {
+		log.FromContext(ctx).WithValues("pod", p.Name).Info("evicted")
+	}
 
 	// podsWaitingEvictionCount are  the number of pods that either haven't had eviction called against them yet
 	// or are still actively terminated and haven't exceeded their termination grace period yet
