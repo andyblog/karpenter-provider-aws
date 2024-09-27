@@ -96,7 +96,7 @@ func (t *Terminator) Drain(ctx context.Context, node *v1.Node) error {
 	// restarting the deployment can reduce the service interruption time.
 	var drainPods []*v1.Pod
 	var restartDeployments []*appsv1.Deployment
-	deletionDeadline := node.GetDeletionTimestamp().Add(2 * time.Minute)
+	deletionDeadline := node.GetDeletionTimestamp().Add(5 * time.Minute)
 
 	if time.Now().Before(deletionDeadline) {
 		restartDeployments, drainPods, err = t.GetRestartdeploymentsAndDrainPods(ctx, pods, node.Name)
@@ -105,7 +105,7 @@ func (t *Terminator) Drain(ctx context.Context, node *v1.Node) error {
 		}
 	} else {
 		drainPods = pods
-		log.FromContext(ctx).Info("after two minute")
+		log.FromContext(ctx).Info("after deletionDeadline")
 	}
 
 	if err = t.RestartDeployments(ctx, restartDeployments, node.Name); err != nil {
@@ -117,7 +117,7 @@ func (t *Terminator) Drain(ctx context.Context, node *v1.Node) error {
 	t.Evict(evictablePods)
 
 	for _, p := range  evictablePods {
-		log.FromContext(ctx).WithValues("pod", p.Name).Info("evicted")
+		log.FromContext(ctx).WithValues("pod", p.Name).Info("start evict pod")
 	}
 
 	// podsWaitingEvictionCount are  the number of pods that either haven't had eviction called against them yet
@@ -270,7 +270,7 @@ func (t *Terminator) GetRestartdeploymentsAndDrainPods(ctx context.Context, pods
 
 		if deployment != nil {
 			key := deployment.Namespace + "/" + deployment.Name
-			if nodeDeploymentReplicas[key] == *deployment.Spec.Replicas {
+			if nodeDeploymentReplicas[key] >= *deployment.Spec.Replicas {
 				// If a deployment has multiple pods on this node, there will be multiple deployments here, and deduplication is required.
 				if _, exists := uniqueDeployments[key]; !exists {
 					uniqueDeployments[key] = struct{}{}
