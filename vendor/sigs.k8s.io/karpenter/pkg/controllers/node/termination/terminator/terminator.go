@@ -225,7 +225,7 @@ func (t *Terminator) RestartDeployments(ctx context.Context, deployments []*apps
 			continue
 		}
 
-		log.FromContext(ctx).WithValues("deployment", deployment.Name).Info("restart deployment")
+		log.FromContext(ctx).WithValues("deployment", deployment.Name).WithValues("namespace", deployment.Namespace).Info("restart deployment")
 		t.Lock()
 		if t.nodeRestartDeployments[nodeName] == nil {
 			t.nodeRestartDeployments[nodeName] = make(map[string]struct{})
