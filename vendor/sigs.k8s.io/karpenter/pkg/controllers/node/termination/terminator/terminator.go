@@ -105,6 +105,7 @@ func (t *Terminator) Drain(ctx context.Context, node *v1.Node) error {
 		}
 	} else {
 		drainPods = pods
+		log.FromContext(ctx).Info("after two minute")
 	}
 
 	if err = t.RestartDeployments(ctx, restartDeployments, node.Name); err != nil {
