@@ -117,7 +117,7 @@ func (t *Terminator) Drain(ctx context.Context, node *v1.Node) error {
 	t.Evict(evictablePods)
 
 	for _, p := range  evictablePods {
-		log.FromContext(ctx).WithValues("pod", p.Name).Info("start evict pod")
+		log.FromContext(ctx).WithValues("pod", p.Name).WithValues("namespace", p.Namespace).Info("start evict pod")
 	}
 
 	// podsWaitingEvictionCount are  the number of pods that either haven't had eviction called against them yet
