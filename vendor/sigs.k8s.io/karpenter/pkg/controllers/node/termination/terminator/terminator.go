@@ -36,6 +36,10 @@ import (
 	podutil "sigs.k8s.io/karpenter/pkg/utils/pod"
 )
 
+const (
+	DeploymentRestartNodeAnnotationKey = "karpenter.sh/restart-node"
+)
+
 type Terminator struct {
 	sync.RWMutex
 	clock                  clock.Clock
@@ -98,6 +102,8 @@ func (t *Terminator) Drain(ctx context.Context, node *v1.Node) error {
 	var restartDeployments []*appsv1.Deployment
 	deletionDeadline := node.GetDeletionTimestamp().Add(5 * time.Minute)
 
+	// 5 minutes is roughly based on (maximum time) = 2 minutes to pull the node + 2 minutes to start the service + 1 minute to terminate.
+	// If the restart is not completed after this time, it is possible that the new pod of the deployment cannot be started and the old pod will not be deleted.
 	if time.Now().Before(deletionDeadline) {
 		restartDeployments, drainPods, err = t.GetRestartdeploymentsAndDrainPods(ctx, pods, node.Name)
 		if err != nil {
@@ -220,7 +226,7 @@ func (t *Terminator) RestartDeployments(ctx context.Context, deployments []*apps
 		if deployment.Spec.Template.Annotations == nil {
 			deployment.Spec.Template.Annotations = make(map[string]string)
 		}
-		restartedNode, exists := deployment.Spec.Template.Annotations["kubectl.kubernetes.io/restartedNode"]
+		restartedNode, exists := deployment.Spec.Template.Annotations[DeploymentRestartNodeAnnotationKey]
 		if exists && restartedNode == nodeName {
 			continue
 		}
@@ -233,7 +239,7 @@ func (t *Terminator) RestartDeployments(ctx context.Context, deployments []*apps
 		t.nodeRestartDeployments[nodeName][deployment.Namespace+"/"+deployment.Name] = struct{}{}
 		t.Unlock()
 
-		deployment.Spec.Template.Annotations["kubectl.kubernetes.io/restartedNode"] = nodeName
+		deployment.Spec.Template.Annotations[DeploymentRestartNodeAnnotationKey] = nodeName
 		if err := t.kubeClient.Update(ctx, deployment); err != nil {
 			updateErrors = append(updateErrors, err)
 			continue
